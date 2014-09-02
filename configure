@@ -447,6 +447,7 @@ win_sdk="no"
 want_tools="yes"
 libiscsi=""
 libnfs=""
+quobyte=""
 coroutine=""
 coroutine_pool=""
 debug_stack_usage="no"
@@ -1190,6 +1191,10 @@ for opt do
   ;;
   --enable-libnfs) libnfs="yes"
   ;;
+  --disable-quobyte) quobyte="no"
+  ;;
+  --enable-quobyte) quobyte="yes"
+  ;;
   --enable-profiler) profiler="yes"
   ;;
   --disable-cocoa) cocoa="no"
@@ -1778,6 +1783,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   rbd             rados block device (rbd)
   libiscsi        iscsi support
   libnfs          nfs support
+  quobyte         quobyte support
   smartcard       smartcard support (libcacard)
   libusb          libusb (for usb passthrough)
   live-block-migration   Block migration in the main migration stream
@@ -5971,6 +5977,21 @@ if test "$libnfs" != "no" ; then
   fi
 fi
 
++##########################################
+# Do we have libquobyte
+if test "quobyte" != "no" ; then
+  if $pkg_config --atleast-version=1.4.4 quobyte; then
+    quobyte="yes"
+    quobyte_libs=$($pkg_config --libs quobyte)
+    LIBS="$LIBS $quobyte_libs"
+  else
+    if test "quobyte" = "yes" ; then
+      feature_not_found "quobyte" "Install libquobyte >= 1.4.4"
+    fi
+    quobyte=no
+  fi
+fi
+
 ##########################################
 # Do we have libudev
 if test "$libudev" != "no" ; then
@@ -6394,6 +6415,7 @@ echo "OpenGL support    $opengl"
 echo "OpenGL dmabufs    $opengl_dmabuf"
 echo "libiscsi support  $libiscsi"
 echo "libnfs support    $libnfs"
+echo "quobyte support   $quobyte"
 echo "build guest agent $guest_agent"
 echo "QGA VSS support   $guest_agent_with_vss"
 echo "QGA w32 disk info $guest_agent_ntddscsi"
@@ -6974,6 +6996,10 @@ fi
 if test "$libnfs" = "yes" ; then
   echo "CONFIG_LIBNFS=m" >> $config_host_mak
   echo "LIBNFS_LIBS=$libnfs_libs" >> $config_host_mak
+fi
+
+if test "$quobyte" = "yes" ; then
+  echo "CONFIG_QUOBYTE=y" >> $config_host_mak
 fi
 
 if test "$seccomp" = "yes"; then
