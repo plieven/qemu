@@ -219,8 +219,8 @@ enum {
 
 /* These values can probably be changed arbitrarily.  */
 #define SVGA_SCRATCH_SIZE               0x8000
-#define SVGA_MAX_WIDTH                  ROUND_UP(2360, VNC_DIRTY_PIXELS_PER_BIT)
-#define SVGA_MAX_HEIGHT                 1770
+#define SVGA_MAX_WIDTH                  ROUND_UP(1920, VNC_DIRTY_PIXELS_PER_BIT)
+#define SVGA_MAX_HEIGHT                 1280
 
 #ifdef VERBOSE
 # define GUEST_OS_BASE          0x5001
