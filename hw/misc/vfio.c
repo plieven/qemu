@@ -217,6 +217,8 @@ typedef struct VFIODevice {
     uint32_t features;
 #define VFIO_FEATURE_ENABLE_VGA_BIT 0
 #define VFIO_FEATURE_ENABLE_VGA (1 << VFIO_FEATURE_ENABLE_VGA_BIT)
+#define VFIO_FEATURE_ENABLE_PCI_AER_BIT 1
+#define VFIO_FEATURE_ENABLE_PCI_AER (1 << VFIO_FEATURE_ENABLE_PCI_AER_BIT)
     int32_t bootindex;
     uint8_t pm_cap;
     bool reset_works;
@@ -4025,7 +4027,13 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
         DPRINTF("VFIO_DEVICE_GET_IRQ_INFO failure: %m\n");
         ret = 0;
     } else if (irq_info.count == 1) {
-        vdev->pci_aer = true;
+        vdev->pci_aer = !!(vdev->features & VFIO_FEATURE_ENABLE_PCI_AER);
+        if (!vdev->pci_aer) {
+            error_report("vfio: %04x:%02x:%02x.%x "
+                         "Ignoring error recovery interrupts for the device",
+                         vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                         vdev->host.function);
+        }
     } else {
         error_report("vfio: %04x:%02x:%02x.%x "
                      "Could not enable error recovery for the device",
@@ -4381,6 +4389,9 @@ static Property vfio_pci_dev_properties[] = {
                        intx.mmap_timeout, 1100),
     DEFINE_PROP_BIT("x-vga", VFIODevice, features,
                     VFIO_FEATURE_ENABLE_VGA_BIT, false),
+    DEFINE_PROP_BIT("pci-aer", VFIODevice, features,
+                    VFIO_FEATURE_ENABLE_PCI_AER, true),
+
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
