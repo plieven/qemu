@@ -66,7 +66,11 @@ static uint64_t kvmclock_current_nsec(KVMClockState *s)
 
     cpu_physical_memory_read(kvmclock_struct_pa, &time, sizeof(time));
 
-    assert(time.tsc_timestamp <= migration_tsc);
+    if (migration_tsc > time.tsc_timestamp) {
+        fprintf(stderr, "time.tsc_timestamp > migration_tsc (%lu > %lu)",
+                        time.tsc_timestamp, migration_tsc);
+        assert(time.tsc_timestamp <= migration_tsc);
+    }
     delta = migration_tsc - time.tsc_timestamp;
     if (time.tsc_shift < 0) {
         delta >>= -time.tsc_shift;
