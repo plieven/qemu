@@ -1879,7 +1879,6 @@ static int usb_ohci_init(OHCIState *ohci, DeviceState *dev,
     usb_packet_init(&ohci->usb_packet);
 
     ohci->async_td = 0;
-    qemu_register_reset(ohci_reset, ohci);
 
     return 0;
 }
@@ -1951,6 +1950,15 @@ static void usb_ohci_exit(PCIDevice *dev)
     }
 }
 
+static void usb_ohci_reset_pci(DeviceState *d)
+{
+    PCIDevice *dev = PCI_DEVICE(d);
+    OHCIPCIState *ohci = PCI_OHCI(dev);
+    OHCIState *s = &ohci->state;
+
+    ohci_reset(s);
+}
+
 #define TYPE_SYSBUS_OHCI "sysbus-ohci"
 #define SYSBUS_OHCI(obj) OBJECT_CHECK(OHCISysBusState, (obj), TYPE_SYSBUS_OHCI)
 
@@ -1974,6 +1982,14 @@ static void ohci_realize_pxa(DeviceState *dev, Error **errp)
                   &address_space_memory);
     sysbus_init_irq(sbd, &s->ohci.irq);
     sysbus_init_mmio(sbd, &s->ohci.mem);
+}
+
+static void usb_ohci_reset_sysbus(DeviceState *dev)
+{
+    OHCISysBusState *s = SYSBUS_OHCI(dev);
+    OHCIState *ohci = &s->ohci;
+
+    ohci_reset(ohci);
 }
 
 static Property ohci_pci_properties[] = {
@@ -2097,6 +2113,7 @@ static void ohci_pci_class_init(ObjectClass *klass, void *data)
     dc->props = ohci_pci_properties;
     dc->hotpluggable = false;
     dc->vmsd = &vmstate_ohci;
+    dc->reset = usb_ohci_reset_pci;
 }
 
 static const TypeInfo ohci_pci_info = {
@@ -2120,6 +2137,7 @@ static void ohci_sysbus_class_init(ObjectClass *klass, void *data)
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
     dc->desc = "OHCI USB Controller";
     dc->props = ohci_sysbus_properties;
+    dc->reset = usb_ohci_reset_sysbus;
 }
 
 static const TypeInfo ohci_sysbus_info = {
