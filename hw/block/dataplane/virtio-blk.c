@@ -75,8 +75,7 @@ static void complete_request_vring(VirtIOBlockReq *req, unsigned char status)
     VirtIOBlockDataPlane *s = req->dev->dataplane;
     stb_p(&req->in->status, status);
 
-    vring_push(&req->dev->dataplane->vring, &req->elem,
-               req->qiov.size + sizeof(*req->in));
+    vring_push(&req->dev->dataplane->vring, &req->elem, req->in_len);
 
     /* Suppress notification to guest by BH and its scheduled
      * flag because requests are completed as a batch after io
