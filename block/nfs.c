@@ -329,6 +329,10 @@ static int64_t nfs_client_open(NFSClient *client, const char *filename,
         } else if (!strcmp(qp->p[i].name, "readahead")) {
             nfs_set_readahead(client->context, val);
 #endif
+#ifdef LIBNFS_FEATURE_DEBUG
+        } else if (!strcmp(qp->p[i].name, "debug")) {
+            nfs_set_debug(client->context, val);
+#endif
         } else {
             error_setg(errp, "Unknown NFS parameter name: %s",
                        qp->p[i].name);
