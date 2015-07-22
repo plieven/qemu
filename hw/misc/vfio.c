@@ -1790,7 +1790,7 @@ static uint64_t vfio_rtl8168_window_quirk_read(void *opaque,
                     memory_region_name(&quirk->mem), vdev->host.domain,
                     vdev->host.bus, vdev->host.slot, vdev->host.function);
 
-            return quirk->data.address_match ^ 0x10000000U;
+            return quirk->data.address_match ^ 0x80000000U;
         }
         break;
     case 0: /* data */
@@ -1828,7 +1828,7 @@ static void vfio_rtl8168_window_quirk_write(void *opaque, hwaddr addr,
     switch (addr) {
     case 4: /* address */
         if ((data & 0x7fff0000) == 0x10000) {
-            if (data & 0x10000000U &&
+            if (data & 0x80000000U &&
                 vdev->pdev.cap_present & QEMU_PCI_CAP_MSIX) {
 
                 DPRINTF("%s MSI-X table write(%04x:%02x:%02x.%d)\n",
@@ -1836,8 +1836,9 @@ static void vfio_rtl8168_window_quirk_write(void *opaque, hwaddr addr,
                         vdev->host.bus, vdev->host.slot, vdev->host.function);
 
                 io_mem_write(&vdev->pdev.msix_table_mmio,
-                             (hwaddr)(quirk->data.address_match & 0xfff),
-                             data, size);
+                             (hwaddr)(data & 0xfff),
+                             (uint64_t)quirk->data.address_mask,
+                             size);
             }
 
             quirk->data.flags = 1;
