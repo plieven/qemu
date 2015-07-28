@@ -117,6 +117,9 @@ struct AioContext {
     /* GPollFDs for aio_poll() */
     GArray *pollfds;
 
+    /* Scheduling this BH forces the event loop it iterate */
+    QEMUBH *notify_dummy_bh;
+
     /* Thread pool for performing work and receiving completion callbacks */
     struct ThreadPool *thread_pool;
 
