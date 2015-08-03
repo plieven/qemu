@@ -299,6 +299,7 @@ static void monitor_flush_locked(Monitor *mon)
     const char *buf;
 
     if (mon->skip_flush) {
+		error_report("qmp_debug: skip_flush");
         return;
     }
 
@@ -307,6 +308,9 @@ static void monitor_flush_locked(Monitor *mon)
 
     if (len && !mon->mux_out) {
         rc = qemu_chr_fe_write(mon->chr, (const uint8_t *) buf, len);
+		if (rc < 0) {
+			error_report("qmp_debug: monitor_flush_locked errno %d", errno);
+		}
         if ((rc < 0 && errno != EAGAIN) || (rc == len)) {
             /* all flushed or error */
             QDECREF(mon->outbuf);
@@ -315,6 +319,8 @@ static void monitor_flush_locked(Monitor *mon)
         }
         if (rc > 0) {
             /* partinal write */
+			error_report("qmp_debug: monitor_flush_locked partial write rc %d len %d", rc, (int) len);
+
             QString *tmp = qstring_from_str(buf + rc);
             QDECREF(mon->outbuf);
             mon->outbuf = tmp;
@@ -5186,6 +5192,8 @@ static void monitor_control_event(void *opaque, int event)
 {
     QObject *data;
     Monitor *mon = opaque;
+
+	error_report("qmp_debug: monitor_control_event %d", event);
 
     switch (event) {
     case CHR_EVENT_OPENED:
