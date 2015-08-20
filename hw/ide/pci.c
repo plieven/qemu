@@ -304,21 +304,25 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
     /* Ignore writes to SSBM if it keeps the old value */
     if ((val & BM_CMD_START) != (bm->cmd & BM_CMD_START)) {
         if (!(val & BM_CMD_START)) {
-            /*
-             * We can't cancel Scatter Gather DMA in the middle of the
-             * operation or a partial (not full) DMA transfer would reach
-             * the storage so we wait for completion instead (we beahve
-             * like if the DMA was completed by the time the guest trying
-             * to cancel dma with bmdma_cmd_writeb with BM_CMD_START not
-             * set).
-             *
-             * In the future we'll be able to safely cancel the I/O if the
-             * whole DMA operation will be submitted to disk with a single
-             * aio operation with preadv/pwritev.
-             */
             if (bm->bus->dma->aiocb) {
-                blk_drain_all();
-                assert(bm->bus->dma->aiocb == NULL);
+                if (!bdrv_is_read_only(bm->bus->dma->aiocb->bs)) {
+                    /* We can't cancel Scatter Gather DMA in the middle of the
+                     * operation or a partial (not full) DMA transfer would
+                     * reach the storage so we wait for completion instead
+                     * (we beahve like if the DMA was completed by the time the
+                     * guest trying to cancel dma with bmdma_cmd_writeb with
+                     * BM_CMD_START not set). */
+                    blk_drain_all();
+                    assert(bm->bus->dma->aiocb == NULL);
+                } else {
+                    /* On a read-only device (e.g. CDROM) we can't cause incon-
+                     * sistencies and thus cancel the AIOCB locally and avoid
+                     * to be called back later if the original request is
+                     * completed. */
+                    BlockAIOCB *aiocb = bm->bus->dma->aiocb;
+                    aiocb->cb(aiocb->opaque, -ECANCELED);
+                    aiocb->cb = NULL;
+                }
             }
             bm->status &= ~BM_STATUS_DMAING;
         } else {
