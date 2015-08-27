@@ -601,6 +601,11 @@ static void vnc_dpy_switch(DisplayChangeListener *dcl,
 
     vnc_abort_display_jobs(vd);
 
+    /* if no client is connected use a dummy surface */
+    if (QTAILQ_EMPTY(&vd->clients)) {
+        surface = qemu_create_displaysurface(0, 0);
+    }
+
     /* server surface */
     qemu_pixman_image_unref(vd->server);
     vd->ds = surface;
@@ -1090,6 +1095,9 @@ void vnc_disconnect_finish(VncState *vs)
 
     if (vs->initialized) {
         QTAILQ_REMOVE(&vs->vd->clients, vs, next);
+        if (QTAILQ_EMPTY(&vs->vd->clients)) {
+            vnc_dpy_switch(&vs->vd->dcl, NULL);
+        }
         qemu_remove_mouse_mode_change_notifier(&vs->mouse_mode_notifier);
     }
 
@@ -2897,6 +2905,7 @@ void vnc_init_state(VncState *vs)
 {
     vs->initialized = true;
     VncDisplay *vd = vs->vd;
+    bool first_client;
 
     vs->last_x = -1;
     vs->last_y = -1;
@@ -2909,9 +2918,15 @@ void vnc_init_state(VncState *vs)
     qemu_mutex_init(&vs->output_mutex);
     vs->bh = qemu_bh_new(vnc_jobs_bh, vs);
 
-    QTAILQ_INSERT_HEAD(&vd->clients, vs, next);
+    first_client = QTAILQ_EMPTY(&vd->clients);
+    QTAILQ_INSERT_TAIL(&vd->clients, vs, next);
 
-    graphic_hw_update(NULL);
+    if (first_client) {
+        /* set/restore the correct surface in the VNC server */
+        console_select(0);
+    } else {
+        graphic_hw_update(vd->dcl.con);
+    }
 
     vnc_write(vs, "RFB 003.008\n", 12);
     vnc_flush(vs);
