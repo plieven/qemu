@@ -194,8 +194,6 @@ static void vnc_async_encoding_start(VncState *orig, VncState *local)
     local->zrle = orig->zrle;
     local->output =  queue->buffer;
     local->csock = -1; /* Don't do any network work on this thread */
-
-    buffer_reset(&local->output);
 }
 
 static void vnc_async_encoding_end(VncState *orig, VncState *local)
@@ -207,6 +205,7 @@ static void vnc_async_encoding_end(VncState *orig, VncState *local)
     orig->lossy_rect = local->lossy_rect;
 
     queue->buffer = local->output;
+    buffer_reset(&queue->buffer);
 }
 
 static int vnc_worker_thread_loop(VncJobQueue *queue)
