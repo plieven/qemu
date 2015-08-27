@@ -475,6 +475,7 @@ void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
 }
 
 #define BUFFER_MIN_INIT_SIZE 4096
+#define BUFFER_MIN_SHRINK_SIZE 65536
 
 void buffer_reserve(Buffer *buffer, size_t len)
 {
@@ -499,9 +500,19 @@ uint8_t *buffer_end(Buffer *buffer)
     return buffer->buffer + buffer->offset;
 }
 
+static void buffer_shrink(Buffer *buffer) {
+    size_t new = MAX(pow2ceil(buffer->offset) * 2,
+                     BUFFER_MIN_SHRINK_SIZE);
+    if (new < buffer->capacity) {
+        buffer->buffer = g_realloc(buffer->buffer, new);
+        buffer->capacity = new;
+    }
+}
+
 void buffer_reset(Buffer *buffer)
 {
-        buffer->offset = 0;
+     buffer->offset = 0;
+     buffer_shrink(buffer);
 }
 
 void buffer_free(Buffer *buffer)
@@ -523,6 +534,7 @@ void buffer_advance(Buffer *buf, size_t len)
     memmove(buf->buffer, buf->buffer + len,
             (buf->offset - len));
     buf->offset -= len;
+    buffer_shrink(buf);
 }
 
 static void vnc_desktop_resize(VncState *vs)
