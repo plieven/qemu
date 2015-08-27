@@ -474,10 +474,13 @@ void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
     vnc_write_s32(vs, encoding);
 }
 
+#define BUFFER_MIN_INIT_SIZE 4096
+
 void buffer_reserve(Buffer *buffer, size_t len)
 {
     if ((buffer->capacity - buffer->offset) < len) {
-        buffer->capacity += (len + 1024);
+        buffer->capacity = pow2ceil(buffer->capacity + len);
+        buffer->capacity = MAX(buffer->capacity, BUFFER_MIN_INIT_SIZE);
         buffer->buffer = g_realloc(buffer->buffer, buffer->capacity);
         if (buffer->buffer == NULL) {
             fprintf(stderr, "vnc: out of memory\n");
