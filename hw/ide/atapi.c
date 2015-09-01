@@ -105,31 +105,51 @@ static void cd_data_to_raw(uint8_t *buf, int lba)
     memset(buf, 0, 288);
 }
 
-static int cd_read_sector(IDEState *s, int lba, uint8_t *buf, int sector_size)
+static void cd_read_sector_cb(void *opaque, int ret)
 {
-    int ret;
+    IDEState *s = opaque;
 
-    switch(sector_size) {
-    case 2048:
-        block_acct_start(blk_get_stats(s->blk), &s->acct,
-                         4 * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
-        ret = blk_read(s->blk, (int64_t)lba << 2, buf, 4);
-        block_acct_done(blk_get_stats(s->blk), &s->acct);
-        break;
-    case 2352:
-        block_acct_start(blk_get_stats(s->blk), &s->acct,
-                         4 * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
-        ret = blk_read(s->blk, (int64_t)lba << 2, buf + 16, 4);
-        block_acct_done(blk_get_stats(s->blk), &s->acct);
-        if (ret < 0)
-            return ret;
-        cd_data_to_raw(buf, lba);
-        break;
-    default:
-        ret = -EIO;
-        break;
+    block_acct_done(blk_get_stats(s->blk), &s->acct);
+
+    if (ret < 0) {
+        ide_atapi_io_error(s, ret);
+        return;
     }
-    return ret;
+
+    if (s->cd_sector_size == 2352) {
+        cd_data_to_raw(s->io_buffer, s->lba);
+    }
+
+    s->lba++;
+    s->io_buffer_index = 0;
+    s->status &= ~BUSY_STAT;
+
+    ide_atapi_cmd_reply_end(s);
+}
+
+static int cd_read_sector(IDEState *s, int lba, void *buf, int sector_size)
+{
+    if (sector_size != 2048 && sector_size != 2352) {
+        return -EINVAL;
+    }
+
+    s->iov.iov_base = buf;
+    if (sector_size == 2352) {
+        buf += 4;
+    }
+
+    s->iov.iov_len = 4 * BDRV_SECTOR_SIZE;
+    qemu_iovec_init_external(&s->qiov, &s->iov, 1);
+
+    if (blk_aio_readv(s->blk, (int64_t)lba << 2, &s->qiov, 4,
+                      cd_read_sector_cb, s) == NULL) {
+        return -EIO;
+    }
+
+    block_acct_start(blk_get_stats(s->blk), &s->acct,
+                     4 * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
+    s->status |= BUSY_STAT;
+    return 0;
 }
 
 void ide_atapi_cmd_ok(IDEState *s)
@@ -190,10 +210,8 @@ void ide_atapi_cmd_reply_end(IDEState *s)
             ret = cd_read_sector(s, s->lba, s->io_buffer, s->cd_sector_size);
             if (ret < 0) {
                 ide_atapi_io_error(s, ret);
-                return;
             }
-            s->lba++;
-            s->io_buffer_index = 0;
+            return;
         }
         if (s->elementary_transfer_size > 0) {
             /* there are some data left to transmit in this elementary
@@ -275,7 +293,6 @@ static void ide_atapi_cmd_read_pio(IDEState *s, int lba, int nb_sectors,
     s->io_buffer_index = sector_size;
     s->cd_sector_size = sector_size;
 
-    s->status = READY_STAT | SEEK_STAT;
     ide_atapi_cmd_reply_end(s);
 }
 
