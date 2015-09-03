@@ -305,6 +305,7 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
     if ((val & BM_CMD_START) != (bm->cmd & BM_CMD_START)) {
         if (!(val & BM_CMD_START)) {
             if (bm->bus->dma->aiocb) {
+                error_report("bmdma cancel: bs %p read-only %d", bm->bus->dma->aiocb->bs, bdrv_is_read_only(bm->bus->dma->aiocb->bs));
                 if (!bdrv_is_read_only(bm->bus->dma->aiocb->bs)) {
                     /* We can't cancel Scatter Gather DMA in the middle of the
                      * operation or a partial (not full) DMA transfer would
