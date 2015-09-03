@@ -189,24 +189,21 @@ bool aio_dispatch(AioContext *ctx)
 bool aio_poll(AioContext *ctx, bool blocking)
 {
     AioHandler *node;
-    bool was_dispatching;
     int ret;
     bool progress;
 
-    was_dispatching = ctx->dispatching;
     progress = false;
 
     /* aio_notify can avoid the expensive event_notifier_set if
      * everything (file descriptors, bottom halves, timers) will
      * be re-evaluated before the next blocking poll().  This is
      * already true when aio_poll is called with blocking == false;
-     * if blocking == true, it is only true after poll() returns.
-     *
-     * If we're in a nested event loop, ctx->dispatching might be true.
-     * In that case we can restore it just before returning, but we
-     * have to clear it now.
+     * if blocking == true, it is only true after poll() returns,
+     * so disable the optimization now.
      */
-    aio_set_dispatching(ctx, !blocking);
+    if (blocking) {
+        atomic_add(&ctx->notify_me, 2);
+    }
 
     ctx->walking_handlers++;
 
@@ -232,6 +229,10 @@ bool aio_poll(AioContext *ctx, bool blocking)
                          ctx->pollfds->len,
                          blocking ? aio_compute_timeout(ctx) : 0);
 
+    if (blocking) {
+        atomic_sub(&ctx->notify_me, 2);
+    }
+
     /* if we have any readable fds, dispatch event */
     if (ret > 0) {
         QLIST_FOREACH(node, &ctx->aio_handlers, node) {
@@ -244,11 +245,9 @@ bool aio_poll(AioContext *ctx, bool blocking)
     }
 
     /* Run dispatch even if there were no readable fds to run timers */
-    aio_set_dispatching(ctx, true);
     if (aio_dispatch(ctx)) {
         progress = true;
     }
 
-    aio_set_dispatching(ctx, was_dispatching);
     return progress;
 }
