@@ -742,9 +742,9 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .family = 15,
         .model = 6,
         .stepping = 1,
-        /* Missing: CPUID_VME, CPUID_HT */
+        /* Missing: CPUID_HT */
         .features[FEAT_1_EDX] =
-            PPRO_FEATURES |
+            PPRO_FEATURES | CPUID_VME |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA |
             CPUID_PSE36,
         /* Missing: CPUID_EXT_POPCNT, CPUID_EXT_MONITOR */
@@ -784,7 +784,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            PPRO_FEATURES |
+            PPRO_FEATURES | CPUID_VME |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA | CPUID_PSE36,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3,
@@ -910,7 +910,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 15,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -932,7 +932,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 23,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -955,7 +955,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 26,
         .stepping = 3,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -978,7 +978,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 44,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1002,7 +1002,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 42,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1029,7 +1029,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 60,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1062,7 +1062,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 61,
         .stepping = 2,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1096,7 +1096,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1121,7 +1121,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1149,7 +1149,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 6,
         .stepping = 1,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1179,7 +1179,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 1,
         .stepping = 2,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
@@ -1213,7 +1213,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .model = 2,
         .stepping = 0,
         .features[FEAT_1_EDX] =
-            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |

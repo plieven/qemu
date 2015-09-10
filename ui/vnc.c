@@ -474,10 +474,14 @@ void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
     vnc_write_s32(vs, encoding);
 }
 
+#define BUFFER_MIN_INIT_SIZE 4096
+#define BUFFER_MIN_SHRINK_SIZE 65536
+
 void buffer_reserve(Buffer *buffer, size_t len)
 {
     if ((buffer->capacity - buffer->offset) < len) {
-        buffer->capacity += (len + 1024);
+        buffer->capacity = pow2ceil(buffer->capacity + len);
+        buffer->capacity = MAX(buffer->capacity, BUFFER_MIN_INIT_SIZE);
         buffer->buffer = g_realloc(buffer->buffer, buffer->capacity);
         if (buffer->buffer == NULL) {
             fprintf(stderr, "vnc: out of memory\n");
@@ -496,9 +500,19 @@ uint8_t *buffer_end(Buffer *buffer)
     return buffer->buffer + buffer->offset;
 }
 
+static void buffer_shrink(Buffer *buffer) {
+    size_t new = MAX(pow2ceil(buffer->offset) * 2,
+                     BUFFER_MIN_SHRINK_SIZE);
+    if (new < buffer->capacity) {
+        buffer->buffer = g_realloc(buffer->buffer, new);
+        buffer->capacity = new;
+    }
+}
+
 void buffer_reset(Buffer *buffer)
 {
-        buffer->offset = 0;
+     buffer->offset = 0;
+     buffer_shrink(buffer);
 }
 
 void buffer_free(Buffer *buffer)
@@ -520,6 +534,7 @@ void buffer_advance(Buffer *buf, size_t len)
     memmove(buf->buffer, buf->buffer + len,
             (buf->offset - len));
     buf->offset -= len;
+    buffer_shrink(buf);
 }
 
 static void vnc_desktop_resize(VncState *vs)
@@ -585,6 +600,11 @@ static void vnc_dpy_switch(DisplayChangeListener *dcl,
     int width, height;
 
     vnc_abort_display_jobs(vd);
+
+    /* if no client is connected use a dummy surface */
+    if (QTAILQ_EMPTY(&vd->clients)) {
+        surface = qemu_create_displaysurface(0, 0);
+    }
 
     /* server surface */
     qemu_pixman_image_unref(vd->server);
@@ -704,6 +724,8 @@ int vnc_raw_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
 int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
 {
     int n = 0;
+    bool encode_raw = false;
+    size_t saved_offs = vs->output.offset;
 
     switch(vs->vnc_encoding) {
         case VNC_ENCODING_ZLIB:
@@ -726,10 +748,24 @@ int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
             n = vnc_zywrle_send_framebuffer_update(vs, x, y, w, h);
             break;
         default:
-            vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
-            n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
+            encode_raw = true;
             break;
     }
+
+    /* If the client has the same pixel format as our internal buffer and
+     * a RAW encoding would need less space fall back to RAW encoding to
+     * save bandwidth and processing power in the client. */
+    if (!encode_raw && vs->write_pixels == vnc_write_pixels_copy &&
+        12 + h * w * VNC_SERVER_FB_BYTES <= (vs->output.offset - saved_offs)) {
+        vs->output.offset = saved_offs;
+        encode_raw = true;
+    }
+
+    if (encode_raw) {
+        vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
+        n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
+    }
+
     return n;
 }
 
@@ -1075,6 +1111,9 @@ void vnc_disconnect_finish(VncState *vs)
 
     if (vs->initialized) {
         QTAILQ_REMOVE(&vs->vd->clients, vs, next);
+        if (QTAILQ_EMPTY(&vs->vd->clients)) {
+            vnc_dpy_switch(&vs->vd->dcl, NULL);
+        }
         qemu_remove_mouse_mode_change_notifier(&vs->mouse_mode_notifier);
     }
 
@@ -2695,7 +2734,7 @@ static int vnc_refresh_server_surface(VncDisplay *vd)
                     pixman_image_get_width(vd->server));
     int height = MIN(pixman_image_get_height(vd->guest.fb),
                      pixman_image_get_height(vd->server));
-    int cmp_bytes, server_stride, min_stride, guest_stride, y = 0;
+    int cmp_bytes, server_stride, line_bytes, guest_ll, guest_stride, y = 0;
     uint8_t *guest_row0 = NULL, *server_row0;
     VncState *vs;
     int has_dirty = 0;
@@ -2714,17 +2753,21 @@ static int vnc_refresh_server_surface(VncDisplay *vd)
      * Update server dirty map.
      */
     server_row0 = (uint8_t *)pixman_image_get_data(vd->server);
-    server_stride = guest_stride = pixman_image_get_stride(vd->server);
+    server_stride = guest_stride = guest_ll =
+        pixman_image_get_stride(vd->server);
     cmp_bytes = MIN(VNC_DIRTY_PIXELS_PER_BIT * VNC_SERVER_FB_BYTES,
                     server_stride);
     if (vd->guest.format != VNC_SERVER_FB_FORMAT) {
         int width = pixman_image_get_width(vd->server);
         tmpbuf = qemu_pixman_linebuf_create(VNC_SERVER_FB_FORMAT, width);
     } else {
+        int guest_bpp =
+            PIXMAN_FORMAT_BPP(pixman_image_get_format(vd->guest.fb));
         guest_row0 = (uint8_t *)pixman_image_get_data(vd->guest.fb);
         guest_stride = pixman_image_get_stride(vd->guest.fb);
+        guest_ll = pixman_image_get_width(vd->guest.fb) * ((guest_bpp + 7) / 8);
     }
-    min_stride = MIN(server_stride, guest_stride);
+    line_bytes = MIN(server_stride, guest_ll);
 
     for (;;) {
         int x;
@@ -2755,9 +2798,10 @@ static int vnc_refresh_server_surface(VncDisplay *vd)
             if (!test_and_clear_bit(x, vd->guest.dirty[y])) {
                 continue;
             }
-            if ((x + 1) * cmp_bytes > min_stride) {
-                _cmp_bytes = min_stride - x * cmp_bytes;
+            if ((x + 1) * cmp_bytes > line_bytes) {
+                _cmp_bytes = line_bytes - x * cmp_bytes;
             }
+            assert(_cmp_bytes >= 0);
             if (memcmp(server_ptr, guest_ptr, _cmp_bytes) == 0) {
                 continue;
             }
@@ -2882,6 +2926,7 @@ void vnc_init_state(VncState *vs)
 {
     vs->initialized = true;
     VncDisplay *vd = vs->vd;
+    bool first_client;
 
     vs->last_x = -1;
     vs->last_y = -1;
@@ -2894,9 +2939,15 @@ void vnc_init_state(VncState *vs)
     qemu_mutex_init(&vs->output_mutex);
     vs->bh = qemu_bh_new(vnc_jobs_bh, vs);
 
-    QTAILQ_INSERT_HEAD(&vd->clients, vs, next);
+    first_client = QTAILQ_EMPTY(&vd->clients);
+    QTAILQ_INSERT_TAIL(&vd->clients, vs, next);
 
-    graphic_hw_update(NULL);
+    if (first_client) {
+        /* set/restore the correct surface in the VNC server */
+        console_select(0);
+    } else {
+        graphic_hw_update(vd->dcl.con);
+    }
 
     vnc_write(vs, "RFB 003.008\n", 12);
     vnc_flush(vs);
