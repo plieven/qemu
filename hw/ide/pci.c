@@ -304,21 +304,35 @@ void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
     /* Ignore writes to SSBM if it keeps the old value */
     if ((val & BM_CMD_START) != (bm->cmd & BM_CMD_START)) {
         if (!(val & BM_CMD_START)) {
-            /*
-             * We can't cancel Scatter Gather DMA in the middle of the
-             * operation or a partial (not full) DMA transfer would reach
-             * the storage so we wait for completion instead (we beahve
-             * like if the DMA was completed by the time the guest trying
-             * to cancel dma with bmdma_cmd_writeb with BM_CMD_START not
-             * set).
-             *
-             * In the future we'll be able to safely cancel the I/O if the
-             * whole DMA operation will be submitted to disk with a single
-             * aio operation with preadv/pwritev.
-             */
             if (bm->bus->dma->aiocb) {
-                blk_drain_all();
-                assert(bm->bus->dma->aiocb == NULL);
+                if (bm->bus->s && bm->bus->s->requests_cancelable) {
+                    /*
+                     * If the used IDE protocol supports request cancelation we
+                     * can flag requests as canceled here and disable DMA.
+                     * The IDE protocol used MUST use ide_readv_cancelable for all
+                     * read operations and then subsequently can enable this code
+                     * path. Currently this is only supported for read-only
+                     * devices.
+                    */
+                    IDECancelableRequest *req;
+                    QLIST_FOREACH(req, &bm->bus->s->cancelable_requests, list) {
+                        if (!req->canceled) {
+                            req->org_cb(req->org_opaque, -ECANCELED);
+                        }
+                        req->canceled = true;
+                    }
+                } else {
+                    /*
+                     * We can't cancel Scatter Gather DMA in the middle of the
+                     * operation or a partial (not full) DMA transfer would reach
+                     * the storage so we wait for completion instead (we beahve
+                     * like if the DMA was completed by the time the guest trying
+                     * to cancel dma with bmdma_cmd_writeb with BM_CMD_START not
+                     * set).
+                     */
+                    blk_drain_all();
+                    assert(bm->bus->dma->aiocb == NULL);
+                }
             }
             bm->status &= ~BM_STATUS_DMAING;
         } else {

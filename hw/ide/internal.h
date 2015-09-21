@@ -341,6 +341,16 @@ enum ide_dma_cmd {
 #define ide_cmd_is_read(s) \
 	((s)->dma_cmd == IDE_DMA_READ)
 
+typedef struct IDECancelableRequest {
+    QLIST_ENTRY(IDECancelableRequest) list;
+    QEMUIOVector qiov;
+    uint8_t *buf;
+    QEMUIOVector *org_qiov;
+    BlockCompletionFunc *org_cb;
+    void *org_opaque;
+    bool canceled;
+} IDECancelableRequest;
+
 /* NOTE: IDEState represents in fact one drive */
 struct IDEState {
     IDEBus *bus;
@@ -394,6 +404,8 @@ struct IDEState {
     BlockAIOCB *pio_aiocb;
     struct iovec iov;
     QEMUIOVector qiov;
+    QLIST_HEAD(, IDECancelableRequest) cancelable_requests;
+    bool requests_cancelable;
     /* ATA DMA state */
     int32_t io_buffer_offset;
     int32_t io_buffer_size;
@@ -461,6 +473,7 @@ struct IDEBus {
     qemu_irq irq;
 
     int error_status;
+    IDEState *s;
 };
 
 #define TYPE_IDE_DEVICE "ide-device"
@@ -561,6 +574,9 @@ void ide_set_inactive(IDEState *s, bool more);
 BlockAIOCB *ide_issue_trim(BlockBackend *blk,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
         BlockCompletionFunc *cb, void *opaque);
+BlockAIOCB *ide_readv_cancelable(IDEState *s, int64_t sector_num,
+                                 QEMUIOVector *iov, int nb_sectors,
+                                 BlockCompletionFunc *cb, void *opaque);
 
 /* hw/ide/atapi.c */
 void ide_atapi_cmd(IDEState *s);
