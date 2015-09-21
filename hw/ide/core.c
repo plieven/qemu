@@ -592,7 +592,6 @@ static void ide_sector_read_cb(void *opaque, int ret)
 
     ide_set_sector(s, ide_get_sector(s) + n);
     s->nsector -= n;
-    s->io_buffer_offset += 512 * n;
 }
 
 static void ide_readv_cancelable_cb(void *opaque, int ret)
@@ -688,11 +687,12 @@ void ide_sector_read(IDEState *s)
                                  ide_sector_read_cb, s);
 }
 
-static void dma_buf_commit(IDEState *s, uint32_t tx_bytes)
+void dma_buf_commit(IDEState *s, uint32_t tx_bytes)
 {
     if (s->bus->dma->ops->commit_buf) {
         s->bus->dma->ops->commit_buf(s->bus->dma, tx_bytes);
     }
+    s->io_buffer_offset += tx_bytes;
     qemu_sglist_destroy(&s->sg);
 }
 
@@ -888,7 +888,6 @@ static void ide_sector_write_cb(void *opaque, int ret)
         n = s->req_nb_sectors;
     }
     s->nsector -= n;
-    s->io_buffer_offset += 512 * n;
 
     if (s->nsector == 0) {
         /* no more sectors to write */

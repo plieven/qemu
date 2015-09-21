@@ -50,7 +50,6 @@ static void ahci_reset_port(AHCIState *s, int port);
 static void ahci_write_fis_d2h(AHCIDevice *ad, uint8_t *cmd_fis);
 static void ahci_init_d2h(AHCIDevice *ad);
 static int ahci_dma_prepare_buf(IDEDMA *dma, int is_write);
-static void ahci_commit_buf(IDEDMA *dma, uint32_t tx_bytes);
 
 
 static uint32_t  ahci_port_read(AHCIState *s, int port, int offset)
@@ -1141,7 +1140,7 @@ out:
     s->data_ptr = s->data_end;
 
     /* Update number of transferred bytes, destroy sglist */
-    ahci_commit_buf(dma, size);
+    dma_buf_commit(s, size);
 
     s->end_transfer_func(s);
 
@@ -1192,12 +1191,9 @@ static int32_t ahci_dma_prepare_buf(IDEDMA *dma, int is_write)
 static void ahci_commit_buf(IDEDMA *dma, uint32_t tx_bytes)
 {
     AHCIDevice *ad = DO_UPCAST(AHCIDevice, dma, dma);
-    IDEState *s = &ad->port.ifs[0];
 
     tx_bytes += le32_to_cpu(ad->cur_cmd->status);
     ad->cur_cmd->status = cpu_to_le32(tx_bytes);
-
-    qemu_sglist_destroy(&s->sg);
 }
 
 static int ahci_dma_rw_buf(IDEDMA *dma, int is_write)
@@ -1218,10 +1214,9 @@ static int ahci_dma_rw_buf(IDEDMA *dma, int is_write)
     }
 
     /* free sglist, update byte count */
-    ahci_commit_buf(dma, l);
+    dma_buf_commit(s, l);
 
     s->io_buffer_index += l;
-    s->io_buffer_offset += l;
 
     DPRINTF(ad->port_no, "len=%#x\n", l);
 
