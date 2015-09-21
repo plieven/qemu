@@ -429,6 +429,10 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
     s->bus->dma->aiocb = blk_aio_readv(s->blk, (int64_t)s->lba << 2,
                                        &s->bus->dma->qiov, n * 4,
                                        ide_atapi_cmd_read_dma_cb, s);
+    if (s->bus->dma->aiocb == NULL) {
+        ide_atapi_io_error(s, -EIO);
+        goto eot;
+    }
     return;
 
 eot:
