@@ -187,7 +187,7 @@ static int cd_read_sector(IDEState *s, int lba, void *buf)
     printf("cd_read_sector: lba=%d\n", lba);
 #endif
 
-    if (blk_aio_readv(s->blk, (int64_t)lba << 2, &s->qiov, 4,
+    if (ide_readv_cancelable(s, (int64_t)lba << 2, &s->qiov, 4,
                       cd_read_sector_cb, s) == NULL) {
         return -EIO;
     }
@@ -426,7 +426,7 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
     s->bus->dma->iov.iov_len = n * 4 * 512;
     qemu_iovec_init_external(&s->bus->dma->qiov, &s->bus->dma->iov, 1);
 
-    s->bus->dma->aiocb = blk_aio_readv(s->blk, (int64_t)s->lba << 2,
+    s->bus->dma->aiocb = ide_readv_cancelable(s, (int64_t)s->lba << 2,
                                        &s->bus->dma->qiov, n * 4,
                                        ide_atapi_cmd_read_dma_cb, s);
     if (s->bus->dma->aiocb == NULL) {

@@ -2323,6 +2323,7 @@ int ide_init_drive(IDEState *s, BlockBackend *blk, IDEDriveKind kind,
     if (kind == IDE_CD) {
         blk_set_dev_ops(blk, &ide_cd_block_ops, s);
         blk_set_guest_block_size(blk, 2048);
+        s->requests_cancelable = true;
     } else {
         if (!blk_is_inserted(s->blk)) {
             error_report("Device needs media, but drive is empty");
