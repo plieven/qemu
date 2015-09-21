@@ -233,7 +233,7 @@ bool aio_poll(AioContext *ctx, bool blocking)
         atomic_sub(&ctx->notify_me, 2);
     }
 
-    event_notifier_test_and_clear(&ctx->notifier);
+    aio_notify_accept(ctx);
 
     /* if we have any readable fds, dispatch event */
     if (ret > 0) {
