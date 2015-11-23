@@ -72,6 +72,9 @@ static int virtio_blk_handle_rw_error(VirtIOBlockReq *req, int error,
     VirtIOBlock *s = req->dev;
 
     if (action == BLOCK_ERROR_ACTION_STOP) {
+        /* Break the link as the next request is going to be parsed from the
+         * ring again. Otherwise we may end up doing a double completion! */
+        req->mr_next = NULL;
         req->next = s->rq;
         s->rq = req;
     } else if (action == BLOCK_ERROR_ACTION_REPORT) {
