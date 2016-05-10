@@ -1390,7 +1390,7 @@ static int ehci_process_itd(EHCIState *ehci,
 {
     USBDevice *dev;
     USBEndpoint *ep;
-    uint32_t i, len, pid, dir, devaddr, endp, xfers = 0;
+    uint32_t i, len, pid, dir, devaddr, endp;
     uint32_t pg, off, ptr1, ptr2, max, mult;
 
     ehci->periodic_sched_active = PERIODIC_ACTIVE;
@@ -1482,10 +1482,9 @@ static int ehci_process_itd(EHCIState *ehci,
                 ehci_raise_irq(ehci, USBSTS_INT);
             }
             itd->transact[i] &= ~ITD_XACT_ACTIVE;
-            xfers++;
         }
     }
-    return xfers ? 0 : -1;
+    return 0;
 }
 
 
@@ -2004,6 +2003,7 @@ static int ehci_state_writeback(EHCIQueue *q)
 static void ehci_advance_state(EHCIState *ehci, int async)
 {
     EHCIQueue *q = NULL;
+    int itd_count = 0;
     int again;
 
     do {
@@ -2028,10 +2028,12 @@ static void ehci_advance_state(EHCIState *ehci, int async)
 
         case EST_FETCHITD:
             again = ehci_state_fetchitd(ehci, async);
+            itd_count++;
             break;
 
         case EST_FETCHSITD:
             again = ehci_state_fetchsitd(ehci, async);
+            itd_count++;
             break;
 
         case EST_ADVANCEQUEUE:
@@ -2080,7 +2082,8 @@ static void ehci_advance_state(EHCIState *ehci, int async)
             break;
         }
 
-        if (again < 0) {
+        if (again < 0 || itd_count > 16) {
+            /* TODO: notify guest (raise HSE irq?) */
             fprintf(stderr, "processing error - resetting ehci HC\n");
             ehci_reset(ehci);
             again = 0;
