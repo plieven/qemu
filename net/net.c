@@ -735,7 +735,11 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
         return 0;
     }
 
-    if (nc->info->receive_iov) {
+    if (flags & QEMU_NET_PACKET_FLAG_RAW && iovcnt == 1 &&
+        nc->info->receive_raw) {
+        /* this is required for qemu_announce_self() */
+        ret = nc->info->receive_raw(nc, iov[0].iov_base, iov[0].iov_len);
+    } else  if (nc->info->receive_iov) {
         ret = nc->info->receive_iov(nc, iov, iovcnt);
     } else {
         ret = nc_sendv_compat(nc, iov, iovcnt, flags);
