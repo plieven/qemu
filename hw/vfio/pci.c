@@ -2583,7 +2583,13 @@ static void vfio_populate_device(VFIOPCIDevice *vdev, Error **errp)
         /* This can fail for an old kernel or legacy PCI dev */
         trace_vfio_populate_device_get_irq_info_failure(strerror(errno));
     } else if (irq_info.count == 1) {
-        vdev->pci_aer = true;
+        vdev->pci_aer = !!(vdev->features & VFIO_FEATURE_ENABLE_PCI_AER);
+        if (!vdev->pci_aer) {
+            error_report("vfio: %04x:%02x:%02x.%x "
+                         "Ignoring error recovery interrupts for the device",
+                         vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                         vdev->host.function);
+        }
     } else {
         warn_report(VFIO_MSG_PREFIX
                     "Could not enable error recovery for the device",
@@ -3202,6 +3208,8 @@ static Property vfio_pci_dev_properties[] = {
                     VFIO_FEATURE_ENABLE_REQ_BIT, true),
     DEFINE_PROP_BIT("x-igd-opregion", VFIOPCIDevice, features,
                     VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT, false),
+    DEFINE_PROP_BIT("pci-aer", VFIOPCIDevice, features,
+                    VFIO_FEATURE_ENABLE_PCI_AER, true),
     DEFINE_PROP_BOOL("x-no-mmap", VFIOPCIDevice, vbasedev.no_mmap, false),
     DEFINE_PROP_BOOL("x-balloon-allowed", VFIOPCIDevice,
                      vbasedev.balloon_allowed, false),
