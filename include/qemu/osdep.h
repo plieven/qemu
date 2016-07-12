@@ -113,7 +113,8 @@ typedef signed int              int_fast16_t;
 /* Minimum function that returns zero only iff both values are zero.
  * Intended for use with unsigned values only. */
 #ifndef MIN_NON_ZERO
-#define MIN_NON_ZERO(a, b) (((a) != 0 && (a) < (b)) ? (a) : (b))
+#define MIN_NON_ZERO(a, b) ((a) == 0 ? (b) : \
+                                ((b) == 0 ? (a) : (MIN(a, b))))
 #endif
 
 #ifndef ROUND_UP
