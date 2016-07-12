@@ -132,6 +132,8 @@ typedef struct VFIOPCIDevice {
 #define VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT 2
 #define VFIO_FEATURE_ENABLE_IGD_OPREGION \
                                 (1 << VFIO_FEATURE_ENABLE_IGD_OPREGION_BIT)
+#define VFIO_FEATURE_ENABLE_PCI_AER_BIT 3
+#define VFIO_FEATURE_ENABLE_PCI_AER (1 << VFIO_FEATURE_ENABLE_PCI_AER_BIT)
     int32_t bootindex;
     uint32_t igd_gms;
     uint8_t pm_cap;
