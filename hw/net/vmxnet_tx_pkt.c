@@ -60,10 +60,9 @@ void vmxnet_tx_pkt_init(struct VmxnetTxPkt **pkt, uint32_t max_frags,
 {
     struct VmxnetTxPkt *p = g_malloc0(sizeof *p);
 
-    p->vec = g_malloc((sizeof *p->vec) *
-        (max_frags + VMXNET_TX_PKT_PL_START_FRAG));
+    p->vec = g_new(struct iovec, max_frags + VMXNET_TX_PKT_PL_START_FRAG);
 
-    p->raw = g_malloc((sizeof *p->raw) * max_frags);
+    p->raw = g_new(struct iovec, max_frags);
 
     p->max_payload_frags = max_frags;
     p->max_raw_frags = max_frags;
@@ -178,6 +177,11 @@ static bool vmxnet_tx_pkt_parse_headers(struct VmxnetTxPkt *pkt)
         }
 
         l3_hdr->iov_len = IP_HDR_GET_LEN(l3_hdr->iov_base);
+        if(l3_hdr->iov_len < sizeof(struct ip_header))
+        {
+            l3_hdr->iov_len = 0;
+            return false;
+        }
         pkt->l4proto = ((struct ip_header *) l3_hdr->iov_base)->ip_p;
 
         /* copy optional IPv4 header data */
@@ -544,7 +548,7 @@ static bool vmxnet_tx_pkt_do_sw_fragmentation(struct VmxnetTxPkt *pkt,
 
         fragment_offset += fragment_len;
 
-    } while (more_frags);
+    } while (fragment_len && more_frags);
 
     return true;
 }
