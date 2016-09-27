@@ -343,7 +343,6 @@ typedef struct XHCIPort {
 } XHCIPort;
 
 typedef struct XHCITransfer {
-    XHCIState *xhci;
     XHCIEPContext *epctx;
     USBPacket packet;
     QEMUSGList sgl;
@@ -1448,7 +1447,6 @@ static XHCITransfer *xhci_ep_alloc_xfer(XHCIEPContext *epctx,
     }
 
     xfer = g_new0(XHCITransfer, 1);
-    xfer->xhci = epctx->xhci;
     xfer->epctx = epctx;
     xfer->slotid = epctx->slotid;
     xfer->epid = epctx->epid;
@@ -1487,10 +1485,9 @@ static int xhci_ep_nuke_one_xfer(XHCITransfer *t, TRBCCode report)
         killed = 1;
     }
     if (t->running_retry) {
-        XHCIEPContext *epctx = t->xhci->slots[t->slotid-1].eps[t->epid-1];
-        if (epctx) {
-            epctx->retry = NULL;
-            timer_del(epctx->kick_timer);
+        if (t->epctx) {
+            t->epctx->retry = NULL;
+            timer_del(t->epctx->kick_timer);
         }
         t->running_retry = 0;
         killed = 1;
@@ -1720,7 +1717,7 @@ static TRBCCode xhci_set_ep_dequeue(XHCIState *xhci, unsigned int slotid,
 
 static int xhci_xfer_create_sgl(XHCITransfer *xfer, int in_xfer)
 {
-    XHCIState *xhci = xfer->xhci;
+    XHCIState *xhci = xfer->epctx->xhci;
     int i;
 
     xfer->int_req = false;
@@ -1779,7 +1776,7 @@ static void xhci_xfer_report(XHCITransfer *xfer)
     bool reported = 0;
     bool shortpkt = 0;
     XHCIEvent event = {ER_TRANSFER, CC_SUCCESS};
-    XHCIState *xhci = xfer->xhci;
+    XHCIState *xhci = xfer->epctx->xhci;
     int i;
 
     left = xfer->packet.actual_length;
@@ -1853,9 +1850,8 @@ static void xhci_xfer_report(XHCITransfer *xfer)
 
 static void xhci_stall_ep(XHCITransfer *xfer)
 {
-    XHCIState *xhci = xfer->xhci;
-    XHCISlot *slot = &xhci->slots[xfer->slotid-1];
-    XHCIEPContext *epctx = slot->eps[xfer->epid-1];
+    XHCIEPContext *epctx = xfer->epctx;
+    XHCIState *xhci = epctx->xhci;
     uint32_t err;
     XHCIStreamContext *sctx;
 
@@ -1879,7 +1875,7 @@ static int xhci_submit(XHCIState *xhci, XHCITransfer *xfer,
 
 static int xhci_setup_packet(XHCITransfer *xfer)
 {
-    XHCIState *xhci = xfer->xhci;
+    XHCIState *xhci = xfer->epctx->xhci;
     USBEndpoint *ep;
     int dir;
 
@@ -3489,7 +3485,7 @@ static void xhci_complete(USBPort *port, USBPacket *packet)
         return;
     }
     xhci_complete_packet(xfer);
-    xhci_kick_ep(xfer->xhci, xfer->slotid, xfer->epid, xfer->streamid);
+    xhci_kick_ep(xfer->epctx->xhci, xfer->slotid, xfer->epid, xfer->streamid);
     if (xfer->complete) {
         xhci_ep_free_xfer(xfer);
     }
