@@ -1859,7 +1859,6 @@ static BlockDriver bdrv_iscsi = {
     .bdrv_co_readv         = iscsi_co_readv,
     .bdrv_co_writev        = iscsi_co_writev,
     .bdrv_co_writev_flags  = iscsi_co_writev_flags,
-    .supported_write_flags = BDRV_REQ_FUA,
     .bdrv_co_flush_to_disk = iscsi_co_flush,
 
 #ifdef __linux__
