@@ -404,8 +404,8 @@ static void edu_class_init(ObjectClass *class, void *data)
 
     k->realize = pci_edu_realize;
     k->exit = pci_edu_uninit;
-    k->vendor_id = PCI_VENDOR_ID_QEMU;
-    k->device_id = 0x11e8;
+    k->vendor_id = 0x1b36;
+    k->device_id = 0x0100;
     k->revision = 0x10;
     k->class_id = PCI_CLASS_OTHERS;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
