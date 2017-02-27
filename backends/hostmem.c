@@ -217,7 +217,7 @@ static void host_memory_backend_set_prealloc(Object *obj, bool value,
         void *ptr = memory_region_get_ram_ptr(&backend->mr);
         uint64_t sz = memory_region_size(&backend->mr);
 
-        os_mem_prealloc(fd, ptr, sz);
+        os_mem_prealloc(fd, ptr, sz, smp_cpus);
         backend->prealloc = true;
     }
 }
@@ -327,7 +327,7 @@ host_memory_backend_memory_complete(UserCreatable *uc, Error **errp)
          * specified NUMA policy in place.
          */
         if (backend->prealloc) {
-            os_mem_prealloc(memory_region_get_fd(&backend->mr), ptr, sz);
+            os_mem_prealloc(memory_region_get_fd(&backend->mr), ptr, sz, smp_cpus);
         }
     }
 }
