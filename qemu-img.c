@@ -1423,8 +1423,7 @@ enum ImgConvertBlockStatus {
 typedef struct ImgConvertState {
     BlockBackend **src;
     int64_t *src_sectors;
-    int src_cur, src_num;
-    int64_t src_cur_offset;
+    int src_num;
     int64_t total_sectors;
     int64_t allocated_sectors;
     int64_t allocated_done;
@@ -1448,30 +1447,32 @@ typedef struct ImgConvertState {
     int ret;
 } ImgConvertState;
 
-static void convert_select_part(ImgConvertState *s, int64_t sector_num)
+static void convert_select_part(ImgConvertState *s, int64_t sector_num,
+                                int *src_cur, int64_t *src_cur_offset)
 {
-    assert(sector_num >= s->src_cur_offset);
-    while (sector_num - s->src_cur_offset >= s->src_sectors[s->src_cur]) {
-        s->src_cur_offset += s->src_sectors[s->src_cur];
-        s->src_cur++;
-        assert(s->src_cur < s->src_num);
+    *src_cur = 0;
+    *src_cur_offset = 0;
+    while (sector_num - *src_cur_offset >= s->src_sectors[*src_cur]) {
+        *src_cur_offset += s->src_sectors[*src_cur];
+        (*src_cur)++;
+        assert(*src_cur < s->src_num);
     }
 }
 
 static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
 {
-    int64_t ret;
-    int n;
+    int64_t ret, src_cur_offset;
+    int n, src_cur;
 
-    convert_select_part(s, sector_num);
+    convert_select_part(s, sector_num, &src_cur, &src_cur_offset);
 
     assert(s->total_sectors > sector_num);
     n = MIN(s->total_sectors - sector_num, BDRV_REQUEST_MAX_SECTORS);
 
     if (s->sector_next_status <= sector_num) {
         BlockDriverState *file;
-        ret = bdrv_get_block_status(blk_bs(s->src[s->src_cur]),
-                                    sector_num - s->src_cur_offset,
+        ret = bdrv_get_block_status(blk_bs(s->src[src_cur]),
+                                    sector_num - src_cur_offset,
                                     n, &n, &file);
         if (ret < 0) {
             return ret;
@@ -1487,8 +1488,8 @@ static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
             /* Check block status of the backing file chain to avoid
              * needlessly reading zeroes and limiting the iteration to the
              * buffer size */
-            ret = bdrv_get_block_status_above(blk_bs(s->src[s->src_cur]), NULL,
-                                              sector_num - s->src_cur_offset,
+            ret = bdrv_get_block_status_above(blk_bs(s->src[src_cur]), NULL,
+                                              sector_num - src_cur_offset,
                                               n, &n, &file);
             if (ret < 0) {
                 return ret;
@@ -1526,8 +1527,8 @@ static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
     return n;
 }
 
-static int convert_co_read(ImgConvertState *s, int64_t sector_num,
-                           int nb_sectors, uint8_t *buf)
+static int coroutine_fn convert_co_read(ImgConvertState *s, int64_t sector_num,
+                                        int nb_sectors, uint8_t *buf)
 {
     int n, ret;
     QEMUIOVector qiov;
@@ -1536,22 +1537,23 @@ static int convert_co_read(ImgConvertState *s, int64_t sector_num,
     assert(nb_sectors <= s->buf_sectors);
     while (nb_sectors > 0) {
         BlockBackend *blk;
-        int64_t bs_sectors;
+        int src_cur;
+        int64_t bs_sectors, src_cur_offset;
 
         /* In the case of compression with multiple source files, we can get a
          * nb_sectors that spreads into the next part. So we must be able to
          * read across multiple BDSes for one convert_read() call. */
-        convert_select_part(s, sector_num);
-        blk = s->src[s->src_cur];
-        bs_sectors = s->src_sectors[s->src_cur];
+        convert_select_part(s, sector_num, &src_cur, &src_cur_offset);
+        blk = s->src[src_cur];
+        bs_sectors = s->src_sectors[src_cur];
 
-        n = MIN(nb_sectors, bs_sectors - (sector_num - s->src_cur_offset));
+        n = MIN(nb_sectors, bs_sectors - (sector_num - src_cur_offset));
         iov.iov_base = buf;
         iov.iov_len = n << BDRV_SECTOR_BITS;
         qemu_iovec_init_external(&qiov, &iov, 1);
 
         ret = bdrv_co_readv(blk_bs(blk),
-                sector_num - s->src_cur_offset,
+                sector_num - src_cur_offset,
                 n, &qiov);
         if (ret < 0) {
             return ret;
@@ -1566,9 +1568,9 @@ static int convert_co_read(ImgConvertState *s, int64_t sector_num,
 }
 
 
-static int convert_co_write(ImgConvertState *s, int64_t sector_num,
-                            int nb_sectors, uint8_t *buf,
-                            enum ImgConvertBlockStatus status)
+static int coroutine_fn convert_co_write(ImgConvertState *s, int64_t sector_num,
+                                         int nb_sectors, uint8_t *buf,
+                                         enum ImgConvertBlockStatus status)
 {
     int ret;
     QEMUIOVector qiov;
@@ -1645,7 +1647,7 @@ static int convert_co_write(ImgConvertState *s, int64_t sector_num,
     return 0;
 }
 
-static void convert_co_do_copy(void *opaque)
+static void coroutine_fn convert_co_do_copy(void *opaque)
 {
     ImgConvertState *s = opaque;
     uint8_t *buf = NULL;
@@ -1679,7 +1681,7 @@ static void convert_co_do_copy(void *opaque)
             s->ret = n;
             goto out;
         }
-        /* safe current sector and allocation status to local variables */
+        /* save current sector and allocation status to local variables */
         sector_num = s->sector_num;
         status = s->status;
         if (!s->min_sparse && s->status == BLK_ZERO) {
@@ -1690,7 +1692,7 @@ static void convert_co_do_copy(void *opaque)
         s->sector_num += n;
         qemu_co_mutex_unlock(&s->lock);
 
-        if (status == BLK_DATA || (!s->min_sparse && s->status == BLK_ZERO)) {
+        if (status == BLK_DATA || (!s->min_sparse && status == BLK_ZERO)) {
             s->allocated_done += n;
             qemu_progress_print(100.0 * s->allocated_done /
                                         s->allocated_sectors, 0);
@@ -1704,7 +1706,7 @@ static void convert_co_do_copy(void *opaque)
                 s->ret = ret;
                 goto out;
             }
-        } else if (!s->min_sparse && s->status == BLK_ZERO) {
+        } else if (!s->min_sparse && status == BLK_ZERO) {
             status = BLK_DATA;
             memset(buf, 0x00, n * BDRV_SECTOR_SIZE);
         }
@@ -1794,8 +1796,6 @@ static int convert_do_copy(ImgConvertState *s)
     }
 
     /* Do the copy */
-    s->src_cur = 0;
-    s->src_cur_offset = 0;
     s->sector_next_status = 0;
     s->ret = -EINPROGRESS;
 
