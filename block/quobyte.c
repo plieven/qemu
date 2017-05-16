@@ -369,8 +369,8 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
-    /* XXX: there will be an API call for this */
-    client->cluster_size = 8 * 1024 * 1024;
+    client->cluster_size = quobyte_get_object_size(client->fh);
+    assert(client->cluster_size > 0);
 
     bs->total_sectors = ret;
     bs->supported_write_flags = BDRV_REQ_FUA;
