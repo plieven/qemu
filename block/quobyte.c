@@ -156,13 +156,11 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
     req.iocb.op_code = (flags & BDRV_REQ_FUA) ? QB_WRITE_SYNC : QB_WRITE;
     req.iocb.offset = offset;
     req.iocb.length = bytes;
-
-    if (iov->niov > 1) {
-        req.iocb.buffer = g_malloc(bytes);
-        qemu_iovec_to_buf(iov, 0, req.iocb.buffer, bytes);
-    } else {
-        req.iocb.buffer = iov->iov[0].iov_base;
-    }
+    /* We sadly always have to create a bounce buffer since the guest may invalidate
+     * the page while we are writing the data to the DATA SERVICE. As Quobyte
+     * creates checksums for the payload this will lead to CRC errors otherwise. */
+    req.iocb.buffer = g_malloc(bytes);
+    qemu_iovec_to_buf(iov, 0, req.iocb.buffer, bytes);
 
     qemu_mutex_lock(&client->mutex);
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
@@ -176,9 +174,7 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
         qemu_coroutine_yield();
     }
 
-    if (iov->niov > 1) {
-        g_free(req.iocb.buffer);
-    }
+    g_free(req.iocb.buffer);
 
     if (req.result != bytes) {
         return -EIO;
