@@ -4013,6 +4013,7 @@ static Property x86_cpu_properties[] = {
     DEFINE_PROP_BOOL("kvm-no-smi-migration", X86CPU, kvm_no_smi_migration,
                      false),
     DEFINE_PROP_BOOL("vmware-cpuid-freq", X86CPU, vmware_cpuid_freq, true),
+    DEFINE_PROP_BOOL("crash-on-cr8", X86CPU, crash_on_cr8, false),
     DEFINE_PROP_END_OF_LIST()
 };
 
