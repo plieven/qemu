@@ -3283,6 +3283,11 @@ MemTxAttrs kvm_arch_post_run(CPUState *cpu, struct kvm_run *run)
     X86CPU *x86_cpu = X86_CPU(cpu);
     CPUX86State *env = &x86_cpu->env;
 
+    if (x86_cpu->crash_on_cr8 && run->cr8) {
+        error_report("Running Windows is not allowed in this guest.");
+        abort();
+    }
+
     if (run->flags & KVM_RUN_X86_SMM) {
         env->hflags |= HF_SMM_MASK;
     } else {

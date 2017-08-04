@@ -1469,6 +1469,11 @@ struct X86CPU {
     /* Stop SMI delivery for migration compatibility with old machines */
     bool kvm_no_smi_migration;
 
+    /* Crash guest if CR8 register is non zero. Currently only 64-Bit
+     * Windows uses this register. This switch can be used to prevent Windows
+     * from running inside the guest. */
+    bool crash_on_cr8;
+
     /* Number of physical address bits supported */
     uint32_t phys_bits;
 
