@@ -1643,6 +1643,7 @@ static const cmdinfo_t undrain_cmd = {
 
 static int truncate_f(BlockBackend *blk, int argc, char **argv)
 {
+    Error *local_err = NULL;
     int64_t offset;
     int ret;
 
@@ -1652,9 +1653,9 @@ static int truncate_f(BlockBackend *blk, int argc, char **argv)
         return 0;
     }
 
-    ret = blk_truncate(blk, offset);
+    ret = blk_truncate(blk, offset, &local_err);
     if (ret < 0) {
-        printf("truncate: %s\n", strerror(-ret));
+        error_report_err(local_err);
         return 0;
     }
 
