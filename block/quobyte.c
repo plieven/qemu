@@ -380,6 +380,7 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
 
     bs->total_sectors = ret;
     bs->supported_write_flags = BDRV_REQ_FUA;
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
 
     ret = 0;
 out:
