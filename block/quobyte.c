@@ -238,6 +238,16 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
     return ret;
 }
 
+static int
+coroutine_fn quobyte_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
+                                      int count, BdrvRequestFlags flags)
+{
+    if (flags & BDRV_REQ_MAY_UNMAP) {
+        return quobyte_co_pdiscard(bs, offset, count);
+    }
+    return -ENOTSUP;
+}
+
 /* TODO Convert to fine grained options */
 static QemuOptsList runtime_opts = {
     .name = "quobyte",
@@ -464,6 +474,7 @@ static int quobyte_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     QuobyteClient *client = bs->opaque;
     bdi->cluster_size = client->cluster_size;
+    bdi->can_write_zeroes_with_unmap = true;
     return 0;
 }
 
@@ -495,6 +506,7 @@ static BlockDriver bdrv_quobyte = {
     .bdrv_co_pwritev                = quobyte_co_pwritev,
     .bdrv_co_flush_to_disk          = quobyte_co_flush,
     .bdrv_co_pdiscard               = quobyte_co_pdiscard,
+    .bdrv_co_pwrite_zeroes          = quobyte_co_pwrite_zeroes,
 
     .bdrv_attach_aio_context        = quobyte_attach_aio_context,
     .bdrv_detach_aio_context        = quobyte_detach_aio_context,
