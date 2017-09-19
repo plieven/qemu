@@ -467,12 +467,25 @@ static void quobyte_detach_aio_context(BlockDriverState *bs)
 static int quobyte_reopen_prepare(BDRVReopenState *state,
                                   BlockReopenQueue *queue, Error **errp)
 {
-    /* We need to write out any unwritten data if we reopen read-only. */
+    QuobyteClient *client = state->bs->opaque;
+    struct stat st;
+    int ret = 0;
+
     if (!(state->flags & BDRV_O_RDWR)) {
-        return bdrv_flush(state->bs);
+        /* We need to write out any unwritten data if we reopen read-only. */
+        ret = bdrv_flush(state->bs);
+        if (ret) {
+            return ret;
+        }
+        /* Update cache for read-only reopens */
+        ret = quobyte_fstat(client->fh, &st) ? -errno : 0;
+        if (ret) {
+            return ret;
+        }
+        client->st_blocks = st.st_blocks;
     }
 
-    return 0;
+    return ret;
 }
 
 static int quobyte_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
