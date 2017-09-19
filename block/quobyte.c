@@ -40,6 +40,7 @@
 typedef struct QuobyteClient {
     struct quobyte_fh *fh;
     blkcnt_t st_blocks;
+    blksize_t st_blksize;
     AioContext *aio_context;
     bool has_discard;
     uint32_t cluster_size;
@@ -336,6 +337,7 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
 
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
     client->st_blocks = st.st_blocks;
+    client->st_blksize = st.st_blksize;
     client->has_discard = true;
     qemu_mutex_init(&client->mutex);
     goto out;
@@ -483,7 +485,8 @@ static int quobyte_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 
 static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
 {
-    bs->bl.request_alignment = 4096;
+    QuobyteClient *client = bs->opaque;
+    bs->bl.request_alignment = client->st_blksize;
 }
 
 static BlockDriver bdrv_quobyte = {
