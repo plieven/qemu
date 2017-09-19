@@ -472,11 +472,6 @@ static int quobyte_reopen_prepare(BDRVReopenState *state,
     int ret = 0;
 
     if (!(state->flags & BDRV_O_RDWR)) {
-        /* We need to write out any unwritten data if we reopen read-only. */
-        ret = bdrv_flush(state->bs);
-        if (ret) {
-            return ret;
-        }
         /* Update cache for read-only reopens */
         ret = quobyte_fstat(client->fh, &st) ? -errno : 0;
         if (ret) {
