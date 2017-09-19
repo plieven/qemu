@@ -224,17 +224,19 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
 {
 
     QuobyteClient *client = bs->opaque;
-    int ret;
+    int ret = 0;
 
     if (!client->has_discard) {
         return -ENOTSUP;
     }
-    ret = quobyte_fallocate(client->fh, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                            offset, count);
-    ret = translate_err(-errno);
+    if (quobyte_fallocate(client->fh, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                          offset, count) != 0) {
+        ret = translate_err(-errno);
+    }
     if (ret == -ENOTSUP) {
         client->has_discard = false;
     }
+
     return ret;
 }
 
