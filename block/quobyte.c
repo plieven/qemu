@@ -43,7 +43,6 @@ typedef struct QuobyteClient {
     AioContext *aio_context;
     bool has_discard;
     uint32_t cluster_size;
-    QemuMutex mutex;
 } QuobyteClient;
 
 typedef struct QuobyteRequest {
@@ -111,13 +110,10 @@ coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
         req.iocb.buffer = iov->iov[0].iov_base;
     }
 
-    qemu_mutex_lock(&client->mutex);
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
-        qemu_mutex_unlock(&client->mutex);
         return -EIO;
     }
-    qemu_mutex_unlock(&client->mutex);
 
     while (!req.complete) {
         qemu_coroutine_yield();
@@ -162,13 +158,10 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
     req.iocb.buffer = g_malloc(bytes);
     qemu_iovec_to_buf(iov, 0, req.iocb.buffer, bytes);
 
-    qemu_mutex_lock(&client->mutex);
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
-        qemu_mutex_unlock(&client->mutex);
         return -EIO;
     }
-    qemu_mutex_unlock(&client->mutex);
 
     while (!req.complete) {
         qemu_coroutine_yield();
@@ -191,13 +184,10 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
     quobyte_co_init_request(client, &req);
     req.iocb.op_code = QB_FSYNC;
 
-    qemu_mutex_lock(&client->mutex);
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
-        qemu_mutex_unlock(&client->mutex);
         return -EIO;
     }
-    qemu_mutex_unlock(&client->mutex);
 
     while (!req.complete) {
         qemu_coroutine_yield();
@@ -282,7 +272,6 @@ static void quobyte_client_close(QuobyteClient *client)
         g_free(quobyteRegistry);
         quobyteRegistry = NULL;
     }
-    qemu_mutex_destroy(&client->mutex);
     memset(client, 0, sizeof(QuobyteClient));
 }
 
@@ -337,7 +326,6 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
     client->st_blksize = st.st_blksize;
     client->has_discard = true;
-    qemu_mutex_init(&client->mutex);
     goto out;
 fail:
     quobyte_client_close(client);
