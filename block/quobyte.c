@@ -39,7 +39,6 @@
 
 typedef struct QuobyteClient {
     struct quobyte_fh *fh;
-    blkcnt_t st_blocks;
     blksize_t st_blksize;
     AioContext *aio_context;
     bool has_discard;
@@ -336,7 +335,6 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     }
 
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
-    client->st_blocks = st.st_blocks;
     client->st_blksize = st.st_blksize;
     client->has_discard = true;
     qemu_mutex_init(&client->mutex);
@@ -428,22 +426,10 @@ out:
     return ret;
 }
 
-static int64_t quobyte_get_allocated_file_size(BlockDriverState *bs)
-{
-    QuobyteClient *client = bs->opaque;
-    struct stat st;
-
-    if (bdrv_is_read_only(bs) &&
-        !(bs->open_flags & BDRV_O_NOCACHE)) {
-        return client->st_blocks * 512;
-    }
-
-    if (quobyte_fstat(client->fh, &st)) {
-        return -errno;
-    }
-    
-    return st.st_blocks * 512;
-}
+//~ static int64_t quobyte_get_allocated_file_size(BlockDriverState *bs)
+//~ {
+    //~ QuobyteClient *client = bs->opaque;
+//~ }
 
 static int quobyte_file_truncate(BlockDriverState *bs, int64_t offset)
 {
@@ -467,20 +453,7 @@ static void quobyte_detach_aio_context(BlockDriverState *bs)
 static int quobyte_reopen_prepare(BDRVReopenState *state,
                                   BlockReopenQueue *queue, Error **errp)
 {
-    QuobyteClient *client = state->bs->opaque;
-    struct stat st;
-    int ret = 0;
-
-    if (!(state->flags & BDRV_O_RDWR)) {
-        /* Update cache for read-only reopens */
-        ret = quobyte_fstat(client->fh, &st) ? -errno : 0;
-        if (ret) {
-            return ret;
-        }
-        client->st_blocks = st.st_blocks;
-    }
-
-    return ret;
+    return 0;
 }
 
 static int quobyte_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
@@ -506,7 +479,7 @@ static BlockDriver bdrv_quobyte = {
     .create_opts                    = &quobyte_create_opts,
 
     .bdrv_has_zero_init             = bdrv_has_zero_init_1,
-    .bdrv_get_allocated_file_size   = quobyte_get_allocated_file_size,
+    //~ .bdrv_get_allocated_file_size   = quobyte_get_allocated_file_size,
     .bdrv_get_info                  = quobyte_get_info,
     .bdrv_truncate                  = quobyte_file_truncate,
     .bdrv_refresh_limits            = quobyte_refresh_limits,
