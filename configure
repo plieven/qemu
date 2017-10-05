@@ -4816,13 +4816,13 @@ fi
 ##########################################
 # Do we have libquobyte
 if test "quobyte" != "no" ; then
-  if $pkg_config --atleast-version=1.3.1 quobyte; then
+  if $pkg_config --atleast-version=1.4.4 quobyte; then
     quobyte="yes"
     quobyte_libs=$($pkg_config --libs quobyte)
     LIBS="$LIBS $quobyte_libs"
   else
     if test "quobyte" = "yes" ; then
-      feature_not_found "quobyte" "Install libquobyte >= 1.3.1"
+      feature_not_found "quobyte" "Install libquobyte >= 1.4.4"
     fi
     quobyte=no
   fi
