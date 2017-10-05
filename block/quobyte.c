@@ -302,6 +302,10 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     }
 
     if (!quobyteRegistry) {
+        char *procname = g_strdup_printf("%s on QEMU %s", qemu_get_vm_name(),
+                                         QEMU_VERSION);
+        quobyte_set_process_name(procname);
+        g_free(procname);
         if (quobyte_create_adapter(uri->server)) {
             error_setg(errp, "Registration failed.");
             goto fail;
