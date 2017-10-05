@@ -417,10 +417,11 @@ out:
     return ret;
 }
 
-//~ static int64_t quobyte_get_allocated_file_size(BlockDriverState *bs)
-//~ {
-    //~ QuobyteClient *client = bs->opaque;
-//~ }
+static int64_t quobyte_get_allocated_file_size(BlockDriverState *bs)
+{
+    QuobyteClient *client = bs->opaque;
+    return quobyte_get_allocated_bytes(client->fh);
+}
 
 static int quobyte_file_truncate(BlockDriverState *bs, int64_t offset)
 {
@@ -470,7 +471,7 @@ static BlockDriver bdrv_quobyte = {
     .create_opts                    = &quobyte_create_opts,
 
     .bdrv_has_zero_init             = bdrv_has_zero_init_1,
-    //~ .bdrv_get_allocated_file_size   = quobyte_get_allocated_file_size,
+    .bdrv_get_allocated_file_size   = quobyte_get_allocated_file_size,
     .bdrv_get_info                  = quobyte_get_info,
     .bdrv_truncate                  = quobyte_file_truncate,
     .bdrv_refresh_limits            = quobyte_refresh_limits,
