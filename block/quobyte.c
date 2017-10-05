@@ -200,34 +200,37 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
     return 0;
 }
 
-static int translate_err(int err)
-{
-    if (err == -ENODEV || err == -ENOSYS || err == -EOPNOTSUPP ||
-        err == -ENOTTY) {
-        err = -ENOTSUP;
-    }
-    return err;
-}
-
 static int
 coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
 {
-
     QuobyteClient *client = bs->opaque;
-    int ret = 0;
+    QuobyteRequest req;
 
     if (!client->has_discard) {
         return -ENOTSUP;
     }
-    if (quobyte_fallocate(client->fh, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                          offset, count) != 0) {
-        ret = translate_err(-errno);
-    }
-    if (ret == -ENOTSUP) {
-        client->has_discard = false;
+
+    quobyte_co_init_request(client, &req);
+    req.iocb.op_code = QB_FALLOCATE;
+    req.iocb.offset = offset;
+    req.iocb.length = count;
+    req.iocb.mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+
+    if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
+                                         (void*) quobyte_co_generic_cb, &req)) {
+        return -EIO;
     }
 
-    return ret;
+    while (!req.complete) {
+        qemu_coroutine_yield();
+    }
+
+    if (req.result != count) {
+        client->has_discard = false;
+        return -ENOTSUP;
+    }
+
+    return 0;
 }
 
 static int
