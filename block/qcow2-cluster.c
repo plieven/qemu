@@ -1510,7 +1510,7 @@ static int discard_single_l2(BlockDriverState *bs, uint64_t offset,
 }
 
 int qcow2_discard_clusters(BlockDriverState *bs, uint64_t offset,
-    int nb_sectors, enum qcow2_discard_type type, bool full_discard)
+    uint64_t nb_sectors, enum qcow2_discard_type type, bool full_discard)
 {
     BDRVQcow2State *s = bs->opaque;
     uint64_t end_offset;
@@ -1591,8 +1591,8 @@ static int zero_single_l2(BlockDriverState *bs, uint64_t offset,
     return nb_clusters;
 }
 
-int qcow2_zero_clusters(BlockDriverState *bs, uint64_t offset, int nb_sectors,
-                        int flags)
+int qcow2_zero_clusters(BlockDriverState *bs, uint64_t offset,
+                        uint64_t nb_sectors, int flags)
 {
     BDRVQcow2State *s = bs->opaque;
     uint64_t nb_clusters;
