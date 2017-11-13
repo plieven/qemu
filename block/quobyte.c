@@ -56,7 +56,7 @@ typedef struct QuobyteRequest {
   QuobyteClient *client;
 } QuobyteRequest;
 
-#define QUOBYTE_CONCURRENT_REQS 16
+#define QUOBYTE_CONCURRENT_REQS 8
 
 static void quobyte_co_generic_bh_cb(void *opaque)
 {
@@ -377,7 +377,12 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     if (quobyteAioContext < 0) {
-        quobyteAioContext = quobyte_aio_setup(QUOBYTE_CONCURRENT_REQS);
+        int concurrent_reqs = QUOBYTE_CONCURRENT_REQS;
+        if (getenv("QUOBYTE_CONCURRENT_REQS")) {
+            concurrent_reqs = atoi(getenv("QUOBYTE_CONCURRENT_REQS"));
+            error_report("setting concurrent reqs to %d\n", concurrent_reqs);
+        }
+        quobyteAioContext = quobyte_aio_setup(concurrent_reqs);
         if (quobyteAioContext < 0) {
             ret = -errno;
             goto out;
