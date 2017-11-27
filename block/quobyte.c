@@ -289,7 +289,7 @@ static void quobyte_file_close(BlockDriverState *bs)
 static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
                                    int flags, Error **errp, int open_flags)
 {
-    int ret = -EINVAL;
+    int64_t ret = -EINVAL;
     struct stat st;
     URI *uri;
 
@@ -417,8 +417,7 @@ static QemuOptsList quobyte_create_opts = {
 
 static int quobyte_file_create(const char *url, QemuOpts *opts, Error **errp)
 {
-    int ret = 0;
-    int64_t total_size = 0;
+    int64_t ret = 0, total_size = 0;
     QuobyteClient *client = g_new0(QuobyteClient, 1);
 
     client->aio_context = qemu_get_aio_context();
