@@ -114,6 +114,9 @@ coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
 
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
+        if (iov->niov > 1) {
+            g_free(req.iocb.buffer);
+        }
         return -EIO;
     }
 
@@ -162,6 +165,7 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
 
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
+        g_free(req.iocb.buffer);
         return -EIO;
     }
 
