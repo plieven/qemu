@@ -2,7 +2,7 @@
  * QEMU Block driver for iSCSI images
  *
  * Copyright (c) 2010-2011 Ronnie Sahlberg <ronniesahlberg@gmail.com>
- * Copyright (c) 2012-2016 Peter Lieven <pl@kamp.de>
+ * Copyright (c) 2012-2017 Peter Lieven <pl@kamp.de>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -1161,6 +1161,9 @@ retry:
         goto retry;
     }
 
+    iscsi_allocmap_set_invalid(iscsilun, offset >> BDRV_SECTOR_BITS,
+                               bytes >> BDRV_SECTOR_BITS);
+
     if (iTask.status == SCSI_STATUS_CHECK_CONDITION) {
         /* the target might fail with a check condition if it
            is not happy with the alignment of the UNMAP request
@@ -1172,9 +1175,6 @@ retry:
         r = iTask.err_code;
         goto out_unlock;
     }
-
-    iscsi_allocmap_set_invalid(iscsilun, offset >> BDRV_SECTOR_BITS,
-                               count >> BDRV_SECTOR_BITS);
 
 out_unlock:
     qemu_mutex_unlock(&iscsilun->mutex);
