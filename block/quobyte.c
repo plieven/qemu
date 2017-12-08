@@ -308,19 +308,21 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     }
 
     if (!quobyteRegistry) {
-        UuidInfo *uuid_info;
-        char *procname;
-        uuid_info = qmp_query_uuid(NULL);
-        if (strcmp(uuid_info->UUID, UUID_NONE) == 0) {
-            procname = g_strdup_printf("%s using qemu %s", qemu_get_vm_name(),
-                                         QEMU_VERSION);
-        } else {
-            procname = g_strdup_printf("%s (%s) using qemu %s",
-                                       qemu_get_vm_name(), uuid_info->UUID,
-                                       QEMU_VERSION);
+        if (qemu_get_vm_name()) {
+            UuidInfo *uuid_info;
+            char *procname;
+            uuid_info = qmp_query_uuid(NULL);
+            if (strcmp(uuid_info->UUID, UUID_NONE) == 0) {
+                procname = g_strdup_printf("%s using qemu %s",
+                                           qemu_get_vm_name(), QEMU_VERSION);
+            } else {
+                procname = g_strdup_printf("%s (%s) using qemu %s",
+                                           qemu_get_vm_name(), uuid_info->UUID,
+                                           QEMU_VERSION);
+            }
+            quobyte_set_process_name(procname);
+            g_free(procname);
         }
-        quobyte_set_process_name(procname);
-        g_free(procname);
 
         if (quobyte_create_adapter(uri->server)) {
             error_setg(errp, "Registration failed.");
