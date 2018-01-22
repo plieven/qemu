@@ -89,6 +89,7 @@ static bool has_msr_hv_runtime;
 static bool has_msr_hv_synic;
 static bool has_msr_hv_stimer;
 static bool has_msr_xss;
+static bool has_msr_spec_ctrl;
 
 static bool has_msr_architectural_pmu;
 static uint32_t num_architectural_pmu_counters;
@@ -820,6 +821,9 @@ int kvm_arch_init_vcpu(CPUState *cs)
                     break;
                 }
                 if (i == 0xb && !(c->ecx & 0xff00)) {
+                    break;
+                case MSR_IA32_SPEC_CTRL:
+                    has_msr_spec_ctrl = true;
                     break;
                 }
                 if (i == 0xd && c->eax == 0) {
@@ -1667,6 +1671,9 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
     if (has_msr_xss) {
         kvm_msr_entry_add(cpu, MSR_IA32_XSS, env->xss);
     }
+    if (has_msr_spec_ctrl) {
+        kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, env->spec_ctrl);
+    }
 #ifdef TARGET_X86_64
     if (lm_capable_kernel) {
         kvm_msr_entry_add(cpu, MSR_CSTAR, env->cstar);
@@ -1675,6 +1682,7 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
         kvm_msr_entry_add(cpu, MSR_LSTAR, env->lstar);
     }
 #endif
+
     /*
      * The following MSRs have side effects on the guest or are too heavy
      * for normal writeback. Limit them to reset or full state updates.
@@ -2081,6 +2089,9 @@ static int kvm_get_msrs(X86CPU *cpu)
     if (has_msr_xss) {
         kvm_msr_entry_add(cpu, MSR_IA32_XSS, 0);
     }
+    if (has_msr_spec_ctrl) {
+        kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, 0);
+    }
 
 
     if (!env->tsc_valid) {
@@ -2429,6 +2440,9 @@ static int kvm_get_msrs(X86CPU *cpu)
             } else {
                 env->mtrr_var[MSR_MTRRphysIndex(index)].base = msrs[i].data;
             }
+            break;
+        case MSR_IA32_SPEC_CTRL:
+            env->spec_ctrl = msrs[i].data;
             break;
         }
     }
