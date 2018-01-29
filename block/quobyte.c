@@ -296,6 +296,8 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     int64_t ret = -EINVAL;
     struct stat st;
     URI *uri;
+    struct timespec tstart={}, tend={};
+    double tdiff;
 
     uri = uri_parse(filename);
     if (!uri) {
@@ -323,10 +325,16 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
             quobyte_set_process_name(procname);
             g_free(procname);
         }
-
+        clock_gettime(CLOCK_MONOTONIC, &tstart);
         if (quobyte_create_adapter(uri->server)) {
             error_setg(errp, "Registration failed.");
             goto fail;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &tend);
+        tdiff = ((double)tend.tv_sec + 1.0e-9*tend.tv_nsec) -
+                ((double)tstart.tv_sec + 1.0e-9*tstart.tv_nsec);
+        if (tdiff > .25) {
+            error_report("quobyte_create_adapter took about %.5f seconds", tdiff);
         }
         quobyteRegistry = g_strdup(uri->server);
     } else if (strncmp(uri->server, quobyteRegistry, strlen(quobyteRegistry))) {
@@ -336,10 +344,17 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
 
     quobyteClients++;
 
+    clock_gettime(CLOCK_MONOTONIC, &tstart);
     client->fh = quobyte_open(uri->path, flags | O_DIRECT, 0600);
     if (!client->fh) {
         error_setg(errp, "Failed to open/create file: %s", strerror(errno));
         goto fail;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &tend);
+    tdiff = ((double)tend.tv_sec + 1.0e-9*tend.tv_nsec) -
+            ((double)tstart.tv_sec + 1.0e-9*tstart.tv_nsec);
+    if (tdiff > .25) {
+        error_report("quobyte_open took about %.5f seconds", tdiff);
     }
 
     ret = quobyte_fstat(client->fh, &st) ? -errno : 0;
