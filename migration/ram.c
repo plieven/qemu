@@ -2038,6 +2038,10 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
     int64_t t0;
     int done = 0;
 
+    if (blk_mig_bulk_active()) {
+        goto out;
+    }
+
     rcu_read_lock();
     if (ram_list.version != last_version) {
         reset_ram_globals();
@@ -2084,6 +2088,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
      */
     ram_control_after_iterate(f, RAM_CONTROL_ROUND);
 
+out:
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
     bytes_transferred += 8;
 
