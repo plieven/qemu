@@ -501,6 +501,9 @@ static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
 {
     QuobyteClient *client = bs->opaque;
     bs->bl.request_alignment = client->st_blksize;
+    bs->bl.pdiscard_alignment = pow2ceil(client->cluster_size);
+    bs->bl.pwrite_zeroes_alignment = pow2ceil(client->cluster_size);
+    bs->bl.max_pdiscard = 1 << 26; /* 64 MByte */
 }
 
 static BlockDriver bdrv_quobyte = {
