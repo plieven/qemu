@@ -207,7 +207,7 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
 }
 
 static int
-coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+coroutine_fn quobyte_co_pdiscard_internal(BlockDriverState *bs, int64_t offset, int count)
 {
     QuobyteClient *client = bs->opaque;
     QuobyteRequest req;
@@ -240,11 +240,28 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
 }
 
 static int
+coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+{
+    QuobyteClient *client = bs->opaque;
+    int64_t offset_shrunk, count_shrunk;
+
+    offset_shrunk = QEMU_ALIGN_UP(offset, client->cluster_size);
+    count_shrunk = QEMU_ALIGN_DOWN(offset + count, client->cluster_size) - offset_shrunk;
+    if (count_shrunk <= 0) {
+        return 0;
+    }
+    assert(offset_shrunk >= offset);
+    assert(offset_shrunk + count_shrunk <= offset + count);
+
+    return quobyte_co_pdiscard_internal(bs, offset, count);
+}
+
+static int
 coroutine_fn quobyte_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                       int count, BdrvRequestFlags flags)
 {
     if (flags & BDRV_REQ_MAY_UNMAP) {
-        return quobyte_co_pdiscard(bs, offset, count);
+        return quobyte_co_pdiscard_internal(bs, offset, count);
     }
     return -ENOTSUP;
 }
