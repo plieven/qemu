@@ -45,6 +45,9 @@ typedef struct QuobyteClient {
     AioContext *aio_context;
     bool has_discard;
     uint32_t cluster_size;
+    int64_t last_sync;
+    int64_t first_unsynced_write;
+    uint64_t unsynced_bytes;
 } QuobyteClient;
 
 typedef struct QuobyteRequest {
@@ -163,6 +166,13 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
     req.iocb.buffer = g_malloc(bytes);
     qemu_iovec_to_buf(iov, 0, req.iocb.buffer, bytes);
 
+    if (req.iocb.op_code != QB_WRITE_SYNC) {
+        if (!client->unsynced_bytes) {
+            client->first_unsynced_write = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        }
+        client->unsynced_bytes += bytes;
+    }
+
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
         g_free(req.iocb.buffer);
@@ -186,9 +196,17 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
 {
     QuobyteClient *client = bs->opaque;
     QuobyteRequest req;
-
+    int64_t sync_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->last_sync;
+    int64_t write_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->first_unsynced_write;
     quobyte_co_init_request(client, &req);
     req.iocb.op_code = QB_FSYNC;
+
+    if (client->unsynced_bytes && write_age > 10000) {
+        error_report("quobyte_co_flush: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
+                     sync_age, write_age, client->unsynced_bytes);
+    }
+    client->unsynced_bytes = 0;
+    client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
@@ -287,6 +305,11 @@ static void quobyte_client_close(QuobyteClient *client)
 {
     quobyteClients--;
     if (client->fh) {
+        int64_t sync_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->last_sync;
+        int64_t write_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->first_unsynced_write;
+        error_report("quobyte_co_flush: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
+                     sync_age, write_age, client->unsynced_bytes);
+
         quobyte_close(client->fh);
     }
     if (!quobyteClients && quobyteRegistry) {
@@ -383,6 +406,8 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
     client->st_blksize = st.st_blksize;
     client->has_discard = true;
+    client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
     goto out;
 fail:
     quobyte_client_close(client);
