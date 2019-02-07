@@ -201,7 +201,7 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
     quobyte_co_init_request(client, &req);
     req.iocb.op_code = QB_FSYNC;
 
-    if (client->unsynced_bytes && write_age > 10000) {
+    if (client->unsynced_bytes >= 1048576 && write_age > 10000) {
         error_report("quobyte_co_flush: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
                      sync_age, write_age, client->unsynced_bytes);
     }
@@ -307,7 +307,7 @@ static void quobyte_client_close(QuobyteClient *client)
     if (client->fh) {
         int64_t sync_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->last_sync;
         int64_t write_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->first_unsynced_write;
-        error_report("quobyte_co_flush: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
+        error_report("quobyte_client_close: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
                      sync_age, write_age, client->unsynced_bytes);
 
         quobyte_close(client->fh);
