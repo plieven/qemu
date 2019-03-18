@@ -1661,13 +1661,13 @@ void blk_set_aio_context(BlockBackend *blk, AioContext *new_context)
 
     if (bs) {
         if (blk->public.throttle_state) {
+            bdrv_drained_begin(bs);
             throttle_timers_detach_aio_context(&blk->public.throttle_timers);
-        }
-        bdrv_set_aio_context(bs, new_context);
-        if (blk->public.throttle_state) {
             throttle_timers_attach_aio_context(&blk->public.throttle_timers,
                                                new_context);
+            bdrv_drained_end(bs);
         }
+        bdrv_set_aio_context(bs, new_context);
     }
 }
 
