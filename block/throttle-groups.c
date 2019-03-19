@@ -299,6 +299,37 @@ static void schedule_next_request(BlockBackend *blk, bool is_write)
     }
 }
 
+void throttle_group_detach_aio_context(BlockBackend *blk)
+{
+    BlockBackendPublic *blkp = blk_get_public(blk);
+    ThrottleGroup *tg = container_of(blkp->throttle_state, ThrottleGroup, ts);
+    ThrottleTimers *tt = &blkp->throttle_timers;
+    int i;
+
+    assert(blkp->pending_reqs[0] == 0 && blkp->pending_reqs[1] == 0);
+    assert(qemu_co_queue_empty(&blkp->throttled_reqs[0]));
+    assert(qemu_co_queue_empty(&blkp->throttled_reqs[1]));
+
+    /* Kick off next, if necessary */
+    qemu_mutex_lock(&tg->lock);
+    for (i = 0; i < 2; i++) {
+        if (timer_pending(tt->timers[i])) {
+            tg->any_timer_armed[i] = false;
+            schedule_next_request(blk, i);
+        }
+    }
+    qemu_mutex_unlock(&tg->lock);
+
+    throttle_timers_detach_aio_context(&blkp->throttle_timers);
+}
+
+void throttle_group_attach_aio_context(BlockBackend *blk, AioContext *new_context)
+{
+    BlockBackendPublic *blkp = blk_get_public(blk);
+
+    throttle_timers_attach_aio_context(&blkp->throttle_timers, new_context);
+}
+
 /* Check if an I/O request needs to be throttled, wait and set a timer
  * if necessary, and schedule the next request using a round robin
  * algorithm.

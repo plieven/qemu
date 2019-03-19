@@ -44,4 +44,6 @@ void coroutine_fn throttle_group_co_io_limits_intercept(BlockBackend *blk,
                                                         unsigned int bytes,
                                                         bool is_write);
 
+void throttle_group_attach_aio_context(BlockBackend *blk, AioContext *new_context);
+void throttle_group_detach_aio_context(BlockBackend *blk);
 #endif

@@ -547,7 +547,7 @@ void blk_remove_bs(BlockBackend *blk)
     if (blk->public.throttle_state) {
         bs = blk_bs(blk);
         bdrv_drained_begin(bs);
-        throttle_timers_detach_aio_context(&blk->public.throttle_timers);
+        throttle_group_detach_aio_context(blk);
         bdrv_drained_end(bs);
     }
 
@@ -571,8 +571,7 @@ int blk_insert_bs(BlockBackend *blk, BlockDriverState *bs, Error **errp)
 
     notifier_list_notify(&blk->insert_bs_notifiers, blk);
     if (blk->public.throttle_state) {
-        throttle_timers_attach_aio_context(
-            &blk->public.throttle_timers, bdrv_get_aio_context(bs));
+        throttle_group_attach_aio_context(blk, bdrv_get_aio_context(bs));
     }
 
     return 0;
@@ -1658,13 +1657,11 @@ static AioContext *blk_aiocb_get_aio_context(BlockAIOCB *acb)
 void blk_set_aio_context(BlockBackend *blk, AioContext *new_context)
 {
     BlockDriverState *bs = blk_bs(blk);
-
     if (bs) {
         if (blk->public.throttle_state) {
             bdrv_drained_begin(bs);
-            throttle_timers_detach_aio_context(&blk->public.throttle_timers);
-            throttle_timers_attach_aio_context(&blk->public.throttle_timers,
-                                               new_context);
+            throttle_group_detach_aio_context(blk);
+            throttle_group_attach_aio_context(blk, new_context);
             bdrv_drained_end(bs);
         }
         bdrv_set_aio_context(bs, new_context);
