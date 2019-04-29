@@ -652,7 +652,7 @@ static int raw_open_common(BlockDriverState *bs, QDict *options,
     }
 #endif
 
-    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP | BDRV_REQ_NO_FALLBACK;
     ret = 0;
 fail:
     if (filename && (bdrv_flags & BDRV_O_TEMPORARY)) {
@@ -815,6 +815,18 @@ static int raw_handle_perm_lock(BlockDriverState *bs,
 
     switch (op) {
     case RAW_PL_PREPARE:
+        if ((s->perm | new_perm) == s->perm &&
+            (s->shared_perm & new_shared) == s->shared_perm)
+        {
+            /*
+             * We are going to unlock bytes, it should not fail. If it fail due
+             * to some fs-dependent permission-unrelated reasons (which occurs
+             * sometimes on NFS and leads to abort in bdrv_replace_child) we
+             * can't prevent such errors by any check here. And we ignore them
+             * anyway in ABORT and COMMIT.
+             */
+            return 0;
+        }
         ret = raw_apply_lock_bytes(s, s->fd, s->perm | new_perm,
                                    ~s->shared_perm | ~new_shared,
                                    false, errp);
@@ -1500,14 +1512,19 @@ static ssize_t handle_aiocb_write_zeroes_block(RawPosixAIOData *aiocb)
     }
 
 #ifdef BLKZEROOUT
-    do {
-        uint64_t range[2] = { aiocb->aio_offset, aiocb->aio_nbytes };
-        if (ioctl(aiocb->aio_fildes, BLKZEROOUT, range) == 0) {
-            return 0;
-        }
-    } while (errno == EINTR);
+    /* The BLKZEROOUT implementation in the kernel doesn't set
+     * BLKDEV_ZERO_NOFALLBACK, so we can't call this if we have to avoid slow
+     * fallbacks. */
+    if (!(aiocb->aio_type & QEMU_AIO_NO_FALLBACK)) {
+        do {
+            uint64_t range[2] = { aiocb->aio_offset, aiocb->aio_nbytes };
+            if (ioctl(aiocb->aio_fildes, BLKZEROOUT, range) == 0) {
+                return 0;
+            }
+        } while (errno == EINTR);
 
-    ret = translate_err(-errno);
+        ret = translate_err(-errno);
+    }
 #endif
 
     if (ret == -ENOTSUP) {
@@ -2658,6 +2675,9 @@ raw_do_pwrite_zeroes(BlockDriverState *bs, int64_t offset, int bytes,
 
     if (blkdev) {
         acb.aio_type |= QEMU_AIO_BLKDEV;
+    }
+    if (flags & BDRV_REQ_NO_FALLBACK) {
+        acb.aio_type |= QEMU_AIO_NO_FALLBACK;
     }
 
     if (flags & BDRV_REQ_MAY_UNMAP) {
