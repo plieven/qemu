@@ -47,12 +47,15 @@
 typedef struct QuobyteClient {
     struct quobyte_fh *fh;
     blksize_t st_blksize;
+    off_t st_size;
     AioContext *aio_context;
     bool has_discard;
     uint32_t cluster_size;
     int64_t last_sync;
     int64_t first_unsynced_write;
     uint64_t unsynced_bytes;
+    unsigned long *allocmap; /* the allocmap has only hint character */
+    long allocmap_size;
 } QuobyteClient;
 
 typedef struct QuobyteRequest {
@@ -99,6 +102,91 @@ static void quobyte_co_init_request(QuobyteClient *client, QuobyteRequest *req)
                                         .file_handle = client->fh,
                                       }
     };
+}
+
+static void quobyte_allocmap_free(QuobyteClient *client)
+{
+    g_free(client->allocmap);
+    client->allocmap = NULL;
+}
+
+static int quobyte_allocmap_init(QuobyteClient *client)
+{
+    quobyte_allocmap_free(client);
+
+    assert(client->cluster_size);
+    client->allocmap_size =
+        DIV_ROUND_UP(client->st_size, client->cluster_size);
+
+    client->allocmap = bitmap_try_new(client->allocmap_size);
+    if (!client->allocmap) {
+        return -ENOMEM;
+    }
+
+    /* default to all clusters allocated */
+    bitmap_set(client->allocmap, 0, client->allocmap_size);
+
+    return 0;
+}
+
+static void
+quobyte_allocmap_update(QuobyteClient *client, int64_t offset,
+                        int64_t bytes, bool allocated)
+{
+    int64_t cl_num_expanded, nb_cls_expanded, cl_num_shrunk, nb_cls_shrunk;
+
+    if (client->allocmap == NULL) {
+        return;
+    }
+
+    assert(offset + bytes <= client->st_size);
+
+    /* expand to entirely contain all affected clusters */
+    assert(client->cluster_size);
+    cl_num_expanded = offset / client->cluster_size;
+    nb_cls_expanded = DIV_ROUND_UP(offset + bytes,
+                                   client->cluster_size) - cl_num_expanded;
+    /* shrink to touch only completely contained clusters */
+    cl_num_shrunk = DIV_ROUND_UP(offset, client->cluster_size);
+    nb_cls_shrunk = (offset + bytes) / client->cluster_size - cl_num_shrunk;
+    if (allocated) {
+        bitmap_set(client->allocmap, cl_num_expanded, nb_cls_expanded);
+    } else {
+        if (nb_cls_shrunk > 0) {
+            bitmap_clear(client->allocmap, cl_num_shrunk, nb_cls_shrunk);
+        }
+    }
+}
+
+static void
+quobyte_allocmap_set_allocated(QuobyteClient *client, int64_t offset,
+                             int64_t bytes)
+{
+    quobyte_allocmap_update(client, offset, bytes, true);
+}
+
+static void
+quobyte_allocmap_set_unallocated(QuobyteClient *client, int64_t offset,
+                               int64_t bytes)
+{
+    /* Note: if cache.direct=on the fifth argument to quobyte_allocmap_update
+     * is ignored, so this will in effect be an quobyte_allocmap_set_invalid.
+     */
+    quobyte_allocmap_update(client, offset, bytes, false);
+}
+
+static inline bool
+quobyte_allocmap_is_allocated(QuobyteClient *client, int64_t offset,
+                              int64_t bytes)
+{
+    unsigned long size;
+    if (client->allocmap == NULL) {
+        return true;
+    }
+    assert(client->cluster_size);
+    size = DIV_ROUND_UP(offset + bytes, client->cluster_size);
+    return !(find_next_bit(client->allocmap, size,
+                           offset / client->cluster_size) == size);
 }
 
 static int
@@ -177,6 +265,8 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
         }
         client->unsynced_bytes += bytes;
     }
+
+    quobyte_allocmap_set_allocated(client, offset, bytes);
 
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
@@ -259,6 +349,8 @@ coroutine_fn quobyte_co_pdiscard_internal(BlockDriverState *bs, int64_t offset, 
         return -ENOTSUP;
     }
 
+    quobyte_allocmap_set_unallocated(client, offset, count);
+
     return 0;
 }
 
@@ -275,6 +367,10 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
     }
     assert(offset_shrunk >= offset);
     assert(offset_shrunk + count_shrunk <= offset + count);
+
+    if (!quobyte_allocmap_is_allocated(client, offset, count)) {
+        return 0;
+    }
 
     return quobyte_co_pdiscard_internal(bs, offset, count);
 }
@@ -327,6 +423,7 @@ static void quobyte_client_close(QuobyteClient *client)
         g_free(quobyteRegistry);
         quobyteRegistry = NULL;
     }
+    quobyte_allocmap_free(client);
     memset(client, 0, sizeof(QuobyteClient));
 }
 
@@ -411,6 +508,7 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
 
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
     client->st_blksize = st.st_blksize;
+    client->st_size = st.st_size;
     client->has_discard = true;
     client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
@@ -460,6 +558,8 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
 
     client->cluster_size = quobyte_get_object_size(client->fh);
     assert(client->cluster_size > 0);
+
+    quobyte_allocmap_init(client);
 
     bs->total_sectors = ret;
     bs->supported_write_flags = BDRV_REQ_FUA;
@@ -531,6 +631,9 @@ quobyte_file_co_truncate(BlockDriverState *bs, int64_t offset,
         error_setg_errno(errp, -ret, "Failed to truncate file");
         return ret;
     }
+
+    client->st_size = offset;
+    quobyte_allocmap_init(client);
 
     return 0;
 }
