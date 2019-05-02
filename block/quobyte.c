@@ -56,6 +56,7 @@ typedef struct QuobyteClient {
     uint64_t unsynced_bytes;
     unsigned long *allocmap; /* the allocmap has only hint character */
     long allocmap_size;
+    char *filename;
 } QuobyteClient;
 
 typedef struct QuobyteRequest {
@@ -213,6 +214,8 @@ coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
         if (iov->niov > 1) {
             g_free(req.iocb.buffer);
         }
+        error_report("quobyte_co_preadv failed directly at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
+                     offset, bytes, flags, iov, client->filename);
         return -EIO;
     }
 
@@ -224,6 +227,8 @@ coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
         if (iov->niov > 1) {
             g_free(req.iocb.buffer);
         }
+        error_report("quobyte_co_preadv failed with result %d at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
+                     req.result, offset, bytes, flags, iov, client->filename);
         return -EIO;
     }
 
@@ -271,6 +276,8 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
         g_free(req.iocb.buffer);
+        error_report("quobyte_co_pwritev failed directly at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
+                     offset, bytes, flags, iov, client->filename);
         return -EIO;
     }
 
@@ -281,6 +288,8 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
     g_free(req.iocb.buffer);
 
     if (req.result != bytes) {
+        error_report("quobyte_co_writev failed with result %d at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
+                     req.result, offset, bytes, flags, iov, client->filename);
         return -EIO;
     }
 
@@ -305,6 +314,7 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
 
     if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
                                          (void*) quobyte_co_generic_cb, &req)) {
+        error_report("quobyte_co_flush failed directly");
         return -EIO;
     }
 
@@ -313,6 +323,7 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
     }
 
     if (req.result) {
+        error_report("quobyte_co_flush failed with result %d", req.result);
         return -EIO;
     }
 
@@ -346,6 +357,8 @@ coroutine_fn quobyte_co_pdiscard_internal(BlockDriverState *bs, int64_t offset, 
 
     if (req.result != count) {
         client->has_discard = false;
+        error_report("quobyte_co_pdiscard_internal failed with result %d at offset %" PRIu64" count %d filename %s",
+                     req.result, offset, count, client->filename);
         return -ENOTSUP;
     }
 
@@ -424,6 +437,7 @@ static void quobyte_client_close(QuobyteClient *client)
         quobyteRegistry = NULL;
     }
     quobyte_allocmap_free(client);
+    g_free(client->filename);
     memset(client, 0, sizeof(QuobyteClient));
 }
 
@@ -511,6 +525,7 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     client->st_size = st.st_size;
     client->has_discard = true;
     client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    client->filename = g_strdup(filename);
 
     goto out;
 fail:
