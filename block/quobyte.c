@@ -566,7 +566,7 @@ out:
 }
 
 static QemuOptsList quobyte_create_opts = {
-    .name = "nfs-create-opts",
+    .name = "quobyte-create-opts",
     .head = QTAILQ_HEAD_INITIALIZER(quobyte_create_opts.head),
     .desc = {
         {
