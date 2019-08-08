@@ -381,11 +381,11 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
     assert(offset_shrunk >= offset);
     assert(offset_shrunk + count_shrunk <= offset + count);
 
-    if (!quobyte_allocmap_is_allocated(client, offset, count)) {
+    if (!quobyte_allocmap_is_allocated(client, offset_shrunk, count_shrunk)) {
         return 0;
     }
 
-    return quobyte_co_pdiscard_internal(bs, offset, count);
+    return quobyte_co_pdiscard_internal(bs, offset_shrunk, count_shrunk);
 }
 
 static int
