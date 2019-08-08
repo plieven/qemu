@@ -372,20 +372,36 @@ coroutine_fn quobyte_co_pdiscard(BlockDriverState *bs, int64_t offset, int count
 {
     QuobyteClient *client = bs->opaque;
     int64_t offset_shrunk, count_shrunk;
+    int alloc_cnt, ret;
 
     offset_shrunk = QEMU_ALIGN_UP(offset, client->cluster_size);
     count_shrunk = QEMU_ALIGN_DOWN(offset + count, client->cluster_size) - offset_shrunk;
-    if (count_shrunk <= 0) {
-        return 0;
-    }
-    assert(offset_shrunk >= offset);
-    assert(offset_shrunk + count_shrunk <= offset + count);
 
-    if (!quobyte_allocmap_is_allocated(client, offset_shrunk, count_shrunk)) {
-        return 0;
+    while (count_shrunk > 0) {
+        if (!quobyte_allocmap_is_allocated(client, offset_shrunk, client->cluster_size)) {
+            /* skip unalloacted clusters */
+            offset_shrunk += client->cluster_size;
+            count_shrunk -= client->cluster_size;
+            continue;
+        }
+        for (alloc_cnt = 1; alloc_cnt < count_shrunk / client->cluster_size; alloc_cnt++) {
+            /* determinate size of continuous allocated */
+            if (!quobyte_allocmap_is_allocated(client, offset_shrunk + alloc_cnt * client->cluster_size, client->cluster_size)) {
+                break;
+            }
+        }
+        assert(offset_shrunk >= offset);
+        assert(offset_shrunk + alloc_cnt * client->cluster_size <= offset + count);
+        assert(alloc_cnt * client->cluster_size <= INT_MAX);
+        ret = quobyte_co_pdiscard_internal(bs, offset_shrunk, alloc_cnt * client->cluster_size);
+        if (ret) {
+            return ret;
+        }
+        offset_shrunk += alloc_cnt * client->cluster_size;
+        count_shrunk -= alloc_cnt * client->cluster_size;
     }
 
-    return quobyte_co_pdiscard_internal(bs, offset_shrunk, count_shrunk);
+    return 0;
 }
 
 static int
