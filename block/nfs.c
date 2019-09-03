@@ -389,6 +389,10 @@ static void nfs_attach_aio_context(BlockDriverState *bs,
 static void nfs_client_close(NFSClient *client)
 {
     if (client->context) {
+        qemu_mutex_lock(&client->mutex);
+        aio_set_fd_handler(client->aio_context, nfs_get_fd(client->context),
+                           false, NULL, NULL, NULL, NULL);
+        qemu_mutex_unlock(&client->mutex);
         if (client->fh) {
             nfs_close(client->context, client->fh);
             client->fh = NULL;
@@ -396,8 +400,6 @@ static void nfs_client_close(NFSClient *client)
 #ifdef LIBNFS_FEATURE_UMOUNT
         nfs_umount(client->context);
 #endif
-        aio_set_fd_handler(client->aio_context, nfs_get_fd(client->context),
-                           false, NULL, NULL, NULL, NULL);
         nfs_destroy_context(client->context);
         client->context = NULL;
     }
