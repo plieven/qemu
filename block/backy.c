@@ -48,6 +48,10 @@ extern void _Z19MurmurHash3_x64_128PKvijPv ( const void * key, int len, uint32_t
 
 /**************************************************************/
 
+#define BACKY_CACHE_SIZE 128
+#define BACKY_CACHE_TIMEOUT 15000
+#define EVENT_INTERVAL 1000
+
 typedef struct BDRVBackyState {
     QemuMutex lock;
     Error *migration_blocker;
@@ -61,11 +65,60 @@ typedef struct BDRVBackyState {
     char zeroblock_hash[DEDUP_MAC_SIZE_BYTES];
     uint32_t crc32c_expected;
     uint8_t *read_buf;
-    uint8_t *chunk_buf;
     char *chunk_dir;
+    uint64_t cache_ts[BACKY_CACHE_SIZE];
+    uint64_t cache_chunk_nr[BACKY_CACHE_SIZE];
+    uint8_t *cache_chunk_buf[BACKY_CACHE_SIZE];
+    QEMUTimer *event_timer;
 } BDRVBackyState;
 
 static const char h2d[256] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0,10,11,12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,11,12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
+static void backy_detach_aio_context(BlockDriverState *bs)
+{
+    BDRVBackyState *s = bs->opaque;
+
+    if (s->event_timer) {
+        timer_del(s->event_timer);
+        timer_free(s->event_timer);
+        s->event_timer = NULL;
+    }
+}
+
+static void backy_events(void *opaque)
+{
+    BDRVBackyState *s = opaque;
+    long i, cnt = 0;
+    uint64_t now;
+
+    qemu_mutex_lock(&s->lock);
+    now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    for (i = 0; i < BACKY_CACHE_SIZE; i++) {
+        if (s->cache_ts[i] && now - s->cache_ts[i] > BACKY_CACHE_TIMEOUT) {
+            s->cache_ts[i] = 0;
+            s->cache_chunk_nr[i] = 0;
+            qemu_vfree(s->cache_chunk_buf[i]);
+            s->cache_chunk_buf[i] = NULL;
+        }
+        if (s->cache_ts[i]) cnt++;
+    }
+    qemu_mutex_unlock(&s->lock);
+
+    timer_mod(s->event_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + EVENT_INTERVAL);
+}
+
+static void backy_attach_aio_context(BlockDriverState *bs,
+                                     AioContext *new_context)
+{
+    BDRVBackyState *s = bs->opaque;
+
+    s->event_timer = aio_timer_new(new_context,
+                                   QEMU_CLOCK_REALTIME, SCALE_MS,
+                                   backy_events, s);
+    timer_mod(s->event_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + EVENT_INTERVAL);
+}
 
 static int backy_open(BlockDriverState *bs, QDict *options, int flags,
                     Error **errp)
@@ -200,14 +253,14 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     s->chunk_dir = g_realloc(s->chunk_dir, strlen(s->chunk_dir) + 7);
     sprintf(s->chunk_dir, "%schunks", s->chunk_dir);
 
-    s->read_buf = g_malloc(s->block_size);
-    s->chunk_buf = g_malloc(s->block_size);
+    s->read_buf = qemu_blockalign(bs, s->block_size);
 
     ret = 0;
 
     bs->total_sectors = (int64_t) DIV_ROUND_UP(s->filesize, BDRV_SECTOR_SIZE);
 
     qemu_mutex_init(&s->lock);
+    backy_attach_aio_context(bs, bdrv_get_aio_context(bs));
 
 fail:
     qemu_opts_del(opts);
@@ -274,56 +327,84 @@ backy_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
             char chunk_filename[DEDUP_HASH_FILENAME_MAX];
             unsigned long out_buf_sz = s->block_size;
             int fd;
+            uint64_t cache_min_ts = UINT64_MAX;
+            long i, cache_min_slot = 0;
+            uint8_t *chunk_buf = NULL;
 
-            backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, s->block_is_compressed[chunk_nr]);
-            fd = open((char*)chunk_filename, O_RDONLY); //XXX: we need to use qemu open functions here
-            if (fd < 0) {
-                if (s->block_is_compressed[chunk_nr]) {
-                    error_report("could not open %s (%s)", chunk_filename, strerror(errno));
-                    goto out;
+            for (i = 0; i < BACKY_CACHE_SIZE; i++) {
+                if (s->cache_ts[i] && s->cache_chunk_nr[i] == chunk_nr) {
+                    chunk_buf = s->cache_chunk_buf[i];
+                    s->cache_ts[i] = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                    break;
                 }
-                if (errno == ENOENT) {
-                    backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, 1);
-                    fd = open((char*)chunk_filename, O_RDONLY);
-                    if (fd < 0) {
+            }
+
+            if (!chunk_buf) {
+                for (i = 0; i < BACKY_CACHE_SIZE; i++) {
+                    if (s->cache_ts[i] < cache_min_ts) {
+                        cache_min_ts = s->cache_ts[i];
+                        cache_min_slot = i;
+                    }
+                }
+
+                s->cache_ts[cache_min_slot] = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+                s->cache_chunk_nr[cache_min_slot] = chunk_nr;
+                if (!s->cache_chunk_buf[cache_min_slot]) {
+                    s->cache_chunk_buf[cache_min_slot] = qemu_blockalign(bs, s->block_size);
+                }
+                chunk_buf = s->cache_chunk_buf[cache_min_slot];
+
+                backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, s->block_is_compressed[chunk_nr]);
+                fd = open((char*)chunk_filename, O_RDONLY); //XXX: we need to use qemu open functions here
+                if (fd < 0) {
+                    if (s->block_is_compressed[chunk_nr]) {
                         error_report("could not open %s (%s)", chunk_filename, strerror(errno));
                         goto out;
                     }
-                    s->block_is_compressed[chunk_nr] = 1;
+                    if (errno == ENOENT) {
+                        backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, 1);
+                        fd = open((char*)chunk_filename, O_RDONLY);
+                        if (fd < 0) {
+                            error_report("could not open %s (%s)", chunk_filename, strerror(errno));
+                            goto out;
+                        }
+                        s->block_is_compressed[chunk_nr] = 1;
+                    }
                 }
-            }
-            rd_bytes = read(fd, s->block_is_compressed[chunk_nr] ? s->read_buf : s->chunk_buf, s->block_size);
-            if (rd_bytes < 0) {
-                error_report("read failed at chunk %" PRIu64 "(%s)", chunk_nr, strerror(errno));
+                rd_bytes = read(fd, s->block_is_compressed[chunk_nr] ? s->read_buf : chunk_buf, s->block_size);
+                if (rd_bytes < 0) {
+                    error_report("read failed at chunk %" PRIu64 "(%s)", chunk_nr, strerror(errno));
+                    close(fd);
+                    goto out;
+                }
                 close(fd);
-                goto out;
-            }
-            close(fd);
 
-            if (s->block_is_compressed[chunk_nr]) {
-                uint64_t decompressed_size;
-                if (rd_bytes < 5 + 3 || s->read_buf[0] != 0xf0) {
-                    error_report("lzo header error (length): seq %lu rd_bytes %ld", chunk_nr, rd_bytes);
-                    goto out;
-                }
-                decompressed_size = s->read_buf[1] << 24 | s->read_buf[2] << 16 | s->read_buf[3] << 8 | s->read_buf[4];
-                if (decompressed_size != expected_size) {
-                    error_report("lzo data has unexpected size (expected %lu found %lu)", expected_size, decompressed_size);
-                    goto out;
-                }
-                ret = lzo1x_decompress_safe(s->read_buf + 5, rd_bytes - 5, s->chunk_buf, &out_buf_sz, NULL);
-                if (ret != LZO_E_OK) {
-                    error_report("lzo1x_decompress failed, return     = %d\n", ret);
-                    ret = -EIO;
-                    goto out;
-                }
-            } else {
-                if (rd_bytes < expected_size) {
-                    error_report("short read. read %ld bytes, expected size is %"PRIu64"\n", rd_bytes, expected_size);
-                    goto out;
+                if (s->block_is_compressed[chunk_nr]) {
+                    uint64_t decompressed_size;
+                    if (rd_bytes < 5 + 3 || s->read_buf[0] != 0xf0) {
+                        error_report("lzo header error (length): seq %lu rd_bytes %ld", chunk_nr, rd_bytes);
+                        goto out;
+                    }
+                    decompressed_size = s->read_buf[1] << 24 | s->read_buf[2] << 16 | s->read_buf[3] << 8 | s->read_buf[4];
+                    if (decompressed_size != expected_size) {
+                        error_report("lzo data has unexpected size (expected %lu found %lu)", expected_size, decompressed_size);
+                        goto out;
+                    }
+                    ret = lzo1x_decompress_safe(s->read_buf + 5, rd_bytes - 5, chunk_buf, &out_buf_sz, NULL);
+                    if (ret != LZO_E_OK) {
+                        error_report("lzo1x_decompress failed, return     = %d\n", ret);
+                        ret = -EIO;
+                        goto out;
+                    }
+                } else {
+                    if (rd_bytes < expected_size) {
+                        error_report("short read. read %ld bytes, expected size is %"PRIu64"\n", rd_bytes, expected_size);
+                        goto out;
+                    }
                 }
             }
-            qemu_iovec_from_buf(qiov, offset - offset0, s->chunk_buf + offset % s->block_size, bytes2);
+
+            qemu_iovec_from_buf(qiov, offset - offset0, chunk_buf + offset % s->block_size, bytes2);
         }
 
         offset += bytes2;
@@ -341,12 +422,16 @@ out:
 static void backy_close(BlockDriverState *bs)
 {
     BDRVBackyState *s = bs->opaque;
+    long i;
     g_free(s->zeroblock);
     g_free(s->block_mapping);
     g_free(s->block_is_compressed);
     g_free(s->chunk_dir);
-    g_free(s->read_buf);
-    g_free(s->chunk_buf);
+    qemu_vfree(s->read_buf);
+    for (i = 0; i < BACKY_CACHE_SIZE; i++) {
+        qemu_vfree(s->cache_chunk_buf[i]);
+    }
+    backy_detach_aio_context(bs);
     qemu_mutex_destroy(&s->lock);
 }
 
@@ -359,6 +444,8 @@ static BlockDriver bdrv_backy = {
     .bdrv_get_info              = backy_get_info,
     .bdrv_reopen_prepare        = backy_reopen_prepare,
     .bdrv_child_perm            = bdrv_format_default_perms,
+    .bdrv_detach_aio_context    = backy_detach_aio_context,
+    .bdrv_attach_aio_context    = backy_attach_aio_context,
 };
 
 static void bdrv_backy_init(void)
