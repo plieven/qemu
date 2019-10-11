@@ -2233,6 +2233,13 @@ int virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
     }
     rcu_read_unlock();
 
+    if (vdc->post_load) {
+        ret = vdc->post_load(vdev);
+        if (ret) {
+            return ret;
+        }
+    }
+
     return 0;
 }
 
