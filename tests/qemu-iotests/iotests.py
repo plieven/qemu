@@ -61,7 +61,6 @@ cachemode = os.environ.get('CACHEMODE')
 qemu_default_machine = os.environ.get('QEMU_DEFAULT_MACHINE')
 
 socket_scm_helper = os.environ.get('SOCKET_SCM_HELPER', 'socket_scm_helper')
-debug = False
 
 luks_default_secret_object = 'secret,id=keysec0,data=' + \
                              os.environ.get('IMGKEYSECRET', '')
@@ -125,6 +124,11 @@ def qemu_img_pipe(*args):
     if exitcode < 0:
         sys.stderr.write('qemu-img received signal %i: %s\n' % (-exitcode, ' '.join(qemu_img_args + list(args))))
     return subp.communicate()[0]
+
+def qemu_img_log(*args):
+    result = qemu_img_pipe(*args)
+    log(result, filters=[filter_testfiles])
+    return result
 
 def img_info_log(filename, filter_path=None, imgopts=False, extra_args=[]):
     args = [ 'info' ]
@@ -516,7 +520,7 @@ class VM(qtest.QEMUQtestMachine):
             output_list += [key + '=' + obj[key]]
         return ','.join(output_list)
 
-    def get_qmp_events_filtered(self, wait=True):
+    def get_qmp_events_filtered(self, wait=60.0):
         result = []
         for ev in self.get_qmp_events(wait=wait):
             result.append(filter_qmp_event(ev))
@@ -533,26 +537,39 @@ class VM(qtest.QEMUQtestMachine):
         return result
 
     # Returns None on success, and an error string on failure
-    def run_job(self, job, auto_finalize=True, auto_dismiss=False):
+    def run_job(self, job, auto_finalize=True, auto_dismiss=False,
+                pre_finalize=None, wait=60.0):
+        match_device = {'data': {'device': job}}
+        match_id = {'data': {'id': job}}
+        events = [
+            ('BLOCK_JOB_COMPLETED', match_device),
+            ('BLOCK_JOB_CANCELLED', match_device),
+            ('BLOCK_JOB_ERROR', match_device),
+            ('BLOCK_JOB_READY', match_device),
+            ('BLOCK_JOB_PENDING', match_id),
+            ('JOB_STATUS_CHANGE', match_id)
+        ]
         error = None
         while True:
-            for ev in self.get_qmp_events_filtered(wait=True):
-                if ev['event'] == 'JOB_STATUS_CHANGE':
-                    status = ev['data']['status']
-                    if status == 'aborting':
-                        result = self.qmp('query-jobs')
-                        for j in result['return']:
-                            if j['id'] == job:
-                                error = j['error']
-                                log('Job failed: %s' % (j['error']))
-                    elif status == 'pending' and not auto_finalize:
-                        self.qmp_log('job-finalize', id=job)
-                    elif status == 'concluded' and not auto_dismiss:
-                        self.qmp_log('job-dismiss', id=job)
-                    elif status == 'null':
-                        return error
-                else:
-                    iotests.log(ev)
+            ev = filter_qmp_event(self.events_wait(events))
+            if ev['event'] != 'JOB_STATUS_CHANGE':
+                log(ev)
+                continue
+            status = ev['data']['status']
+            if status == 'aborting':
+                result = self.qmp('query-jobs')
+                for j in result['return']:
+                    if j['id'] == job:
+                        error = j['error']
+                        log('Job failed: %s' % (j['error']))
+            elif status == 'pending' and not auto_finalize:
+                if pre_finalize:
+                    pre_finalize()
+                self.qmp_log('job-finalize', id=job)
+            elif status == 'concluded' and not auto_dismiss:
+                self.qmp_log('job-dismiss', id=job)
+            elif status == 'null':
+                return error
 
     def node_info(self, node_name):
         nodes = self.qmp('query-named-block-nodes')
@@ -625,7 +642,7 @@ class QMPTestCase(unittest.TestCase):
         self.assertEqual(self.vm.flatten_qmp_object(json.loads(json_filename[5:])),
                          self.vm.flatten_qmp_object(reference))
 
-    def cancel_and_wait(self, drive='drive0', force=False, resume=False):
+    def cancel_and_wait(self, drive='drive0', force=False, resume=False, wait=60.0):
         '''Cancel a block job and wait for it to finish, returning the event'''
         result = self.vm.qmp('block-job-cancel', device=drive, force=force)
         self.assert_qmp(result, 'return', {})
@@ -636,7 +653,7 @@ class QMPTestCase(unittest.TestCase):
         cancelled = False
         result = None
         while not cancelled:
-            for event in self.vm.get_qmp_events(wait=True):
+            for event in self.vm.get_qmp_events(wait=wait):
                 if event['event'] == 'BLOCK_JOB_COMPLETED' or \
                    event['event'] == 'BLOCK_JOB_CANCELLED':
                     self.assert_qmp(event, 'data/device', drive)
@@ -649,10 +666,10 @@ class QMPTestCase(unittest.TestCase):
         self.assert_no_active_block_jobs()
         return result
 
-    def wait_until_completed(self, drive='drive0', check_offset=True):
+    def wait_until_completed(self, drive='drive0', check_offset=True, wait=60.0):
         '''Wait for a block job to finish, returning the event'''
         while True:
-            for event in self.vm.get_qmp_events(wait=True):
+            for event in self.vm.get_qmp_events(wait=wait):
                 if event['event'] == 'BLOCK_JOB_COMPLETED':
                     self.assert_qmp(event, 'data/device', drive)
                     self.assert_qmp_absent(event, 'data/error')
@@ -799,11 +816,23 @@ def skip_if_unsupported(required_formats=[], read_only=False):
         return func_wrapper
     return skip_test_decorator
 
-def main(supported_fmts=[], supported_oses=['linux'], supported_cache_modes=[],
-         unsupported_fmts=[]):
-    '''Run tests'''
+def execute_unittest(output, verbosity, debug):
+    runner = unittest.TextTestRunner(stream=output, descriptions=True,
+                                     verbosity=verbosity)
+    try:
+        # unittest.main() will use sys.exit(); so expect a SystemExit
+        # exception
+        unittest.main(testRunner=runner)
+    finally:
+        if not debug:
+            sys.stderr.write(re.sub(r'Ran (\d+) tests? in [\d.]+s',
+                                    r'Ran \1 tests', output.getvalue()))
 
-    global debug
+def execute_test(test_function=None,
+                 supported_fmts=[], supported_oses=['linux'],
+                 supported_cache_modes=[], unsupported_fmts=[],
+                 supported_protocols=[], unsupported_protocols=[]):
+    """Run either unittest or script-style tests."""
 
     # We are using TEST_DIR and QEMU_DEFAULT_MACHINE as proxies to
     # indicate that we're not being run via "check". There may be
@@ -816,6 +845,7 @@ def main(supported_fmts=[], supported_oses=['linux'], supported_cache_modes=[],
     debug = '-d' in sys.argv
     verbosity = 1
     verify_image_format(supported_fmts, unsupported_fmts)
+    verify_protocol(supported_protocols, unsupported_protocols)
     verify_platform(supported_oses)
     verify_cache_mode(supported_cache_modes)
 
@@ -835,13 +865,15 @@ def main(supported_fmts=[], supported_oses=['linux'], supported_cache_modes=[],
 
     logging.basicConfig(level=(logging.DEBUG if debug else logging.WARN))
 
-    class MyTestRunner(unittest.TextTestRunner):
-        def __init__(self, stream=output, descriptions=True, verbosity=verbosity):
-            unittest.TextTestRunner.__init__(self, stream, descriptions, verbosity)
+    if not test_function:
+        execute_unittest(output, verbosity, debug)
+    else:
+        test_function()
 
-    # unittest.main() will use sys.exit() so expect a SystemExit exception
-    try:
-        unittest.main(testRunner=MyTestRunner)
-    finally:
-        if not debug:
-            sys.stderr.write(re.sub(r'Ran (\d+) tests? in [\d.]+s', r'Ran \1 tests', output.getvalue()))
+def script_main(test_function, *args, **kwargs):
+    """Run script-style tests outside of the unittest framework"""
+    execute_test(test_function, *args, **kwargs)
+
+def main(*args, **kwargs):
+    """Run tests using the unittest framework"""
+    execute_test(None, *args, **kwargs)

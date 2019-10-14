@@ -3987,12 +3987,12 @@ void bdrv_replace_node(BlockDriverState *from, BlockDriverState *to,
     uint64_t perm = 0, shared = BLK_PERM_ALL;
     int ret;
 
-    assert(!atomic_read(&from->in_flight));
-    assert(!atomic_read(&to->in_flight));
-
     /* Make sure that @from doesn't go away until we have successfully attached
      * all of its parents to @to. */
     bdrv_ref(from);
+
+    assert(qemu_get_current_aio_context() == qemu_get_aio_context());
+    bdrv_drained_begin(from);
 
     /* Put all parents into @list and calculate their cumulative permissions */
     QLIST_FOREACH_SAFE(c, &from->parents, next_parent, next) {
@@ -4034,6 +4034,7 @@ void bdrv_replace_node(BlockDriverState *from, BlockDriverState *to,
 
 out:
     g_slist_free(list);
+    bdrv_drained_end(from);
     bdrv_unref(from);
 }
 
@@ -5672,10 +5673,6 @@ void bdrv_detach_aio_context(BlockDriverState *bs)
     BdrvAioNotifier *baf, *baf_tmp;
     BdrvChild *child;
 
-    if (!bs->drv) {
-        return;
-    }
-
     assert(!bs->walking_aio_notifiers);
     bs->walking_aio_notifiers = true;
     QLIST_FOREACH_SAFE(baf, &bs->aio_notifiers, list, baf_tmp) {
@@ -5690,7 +5687,7 @@ void bdrv_detach_aio_context(BlockDriverState *bs)
      */
     bs->walking_aio_notifiers = false;
 
-    if (bs->drv->bdrv_detach_aio_context) {
+    if (bs->drv && bs->drv->bdrv_detach_aio_context) {
         bs->drv->bdrv_detach_aio_context(bs);
     }
     QLIST_FOREACH(child, &bs->children, next) {
@@ -5709,10 +5706,6 @@ void bdrv_attach_aio_context(BlockDriverState *bs,
     BdrvAioNotifier *ban, *ban_tmp;
     BdrvChild *child;
 
-    if (!bs->drv) {
-        return;
-    }
-
     if (bs->quiesce_counter) {
         aio_disable_external(new_context);
     }
@@ -5722,7 +5715,7 @@ void bdrv_attach_aio_context(BlockDriverState *bs,
     QLIST_FOREACH(child, &bs->children, next) {
         bdrv_attach_aio_context(child->bs, new_context);
     }
-    if (bs->drv->bdrv_attach_aio_context) {
+    if (bs->drv && bs->drv->bdrv_attach_aio_context) {
         bs->drv->bdrv_attach_aio_context(bs, new_context);
     }
 

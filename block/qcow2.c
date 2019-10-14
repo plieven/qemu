@@ -831,7 +831,11 @@ static void read_cache_sizes(BlockDriverState *bs, QemuOpts *opts,
     bool l2_cache_entry_size_set;
     int min_refcount_cache = MIN_REFCOUNT_CACHE_SIZE * s->cluster_size;
     uint64_t virtual_disk_size = bs->total_sectors * BDRV_SECTOR_SIZE;
-    uint64_t max_l2_cache = virtual_disk_size / (s->cluster_size / 8);
+    uint64_t max_l2_entries = DIV_ROUND_UP(virtual_disk_size, s->cluster_size);
+    /* An L2 table is always one cluster in size so the max cache size
+     * should be a multiple of the cluster size. */
+    uint64_t max_l2_cache = ROUND_UP(max_l2_entries * sizeof(uint64_t),
+                                     s->cluster_size);
 
     combined_cache_size_set = qemu_opt_get(opts, QCOW2_OPT_CACHE_SIZE);
     l2_cache_size_set = qemu_opt_get(opts, QCOW2_OPT_L2_CACHE_SIZE);
@@ -2721,11 +2725,13 @@ static int qcow2_set_up_encryption(BlockDriverState *bs,
  * Returns: 0 on success, -errno on failure.
  */
 static int coroutine_fn preallocate_co(BlockDriverState *bs, uint64_t offset,
-                                       uint64_t new_length)
+                                       uint64_t new_length, PreallocMode mode,
+                                       Error **errp)
 {
     BDRVQcow2State *s = bs->opaque;
     uint64_t bytes;
     uint64_t host_offset = 0;
+    int64_t file_length;
     unsigned int cur_bytes;
     int ret;
     QCowL2Meta *meta;
@@ -2734,10 +2740,11 @@ static int coroutine_fn preallocate_co(BlockDriverState *bs, uint64_t offset,
     bytes = new_length - offset;
 
     while (bytes) {
-        cur_bytes = MIN(bytes, INT_MAX);
+        cur_bytes = MIN(bytes, QEMU_ALIGN_DOWN(INT_MAX, s->cluster_size));
         ret = qcow2_alloc_cluster_offset(bs, offset, &cur_bytes,
                                          &host_offset, &meta);
         if (ret < 0) {
+            error_setg_errno(errp, -ret, "Allocating clusters failed");
             return ret;
         }
 
@@ -2746,6 +2753,7 @@ static int coroutine_fn preallocate_co(BlockDriverState *bs, uint64_t offset,
 
             ret = qcow2_alloc_cluster_link_l2(bs, meta);
             if (ret < 0) {
+                error_setg_errno(errp, -ret, "Mapping clusters failed");
                 qcow2_free_any_clusters(bs, meta->alloc_offset,
                                         meta->nb_clusters, QCOW2_DISCARD_NEVER);
                 return ret;
@@ -2770,10 +2778,18 @@ static int coroutine_fn preallocate_co(BlockDriverState *bs, uint64_t offset,
      * all of the allocated clusters (otherwise we get failing reads after
      * EOF). Extend the image to the last allocated sector.
      */
-    if (host_offset != 0) {
-        uint8_t data = 0;
-        ret = bdrv_pwrite(s->data_file, (host_offset + cur_bytes) - 1,
-                          &data, 1);
+    file_length = bdrv_getlength(s->data_file->bs);
+    if (file_length < 0) {
+        error_setg_errno(errp, -file_length, "Could not get file size");
+        return file_length;
+    }
+
+    if (host_offset + cur_bytes > file_length) {
+        if (mode == PREALLOC_MODE_METADATA) {
+            mode = PREALLOC_MODE_OFF;
+        }
+        ret = bdrv_co_truncate(s->data_file, host_offset + cur_bytes, mode,
+                               errp);
         if (ret < 0) {
             return ret;
         }
@@ -3745,12 +3761,17 @@ static int coroutine_fn qcow2_co_truncate(BlockDriverState *bs, int64_t offset,
 
     switch (prealloc) {
     case PREALLOC_MODE_OFF:
+        if (has_data_file(bs)) {
+            ret = bdrv_co_truncate(s->data_file, offset, prealloc, errp);
+            if (ret < 0) {
+                goto fail;
+            }
+        }
         break;
 
     case PREALLOC_MODE_METADATA:
-        ret = preallocate_co(bs, old_length, offset);
+        ret = preallocate_co(bs, old_length, offset, prealloc, errp);
         if (ret < 0) {
-            error_setg_errno(errp, -ret, "Preallocation failed");
             goto fail;
         }
         break;
@@ -3766,9 +3787,8 @@ static int coroutine_fn qcow2_co_truncate(BlockDriverState *bs, int64_t offset,
         /* With a data file, preallocation means just allocating the metadata
          * and forwarding the truncate request to the data file */
         if (has_data_file(bs)) {
-            ret = preallocate_co(bs, old_length, offset);
+            ret = preallocate_co(bs, old_length, offset, prealloc, errp);
             if (ret < 0) {
-                error_setg_errno(errp, -ret, "Preallocation failed");
                 goto fail;
             }
             break;
@@ -3881,16 +3901,6 @@ static int coroutine_fn qcow2_co_truncate(BlockDriverState *bs, int64_t offset,
     }
 
     bs->total_sectors = offset / BDRV_SECTOR_SIZE;
-
-    if (has_data_file(bs)) {
-        if (prealloc == PREALLOC_MODE_METADATA) {
-            prealloc = PREALLOC_MODE_OFF;
-        }
-        ret = bdrv_co_truncate(s->data_file, offset, prealloc, errp);
-        if (ret < 0) {
-            goto fail;
-        }
-    }
 
     /* write updated header.size */
     offset = cpu_to_be64(offset);
@@ -4378,14 +4388,17 @@ static int qcow2_make_empty(BlockDriverState *bs)
 
     if (s->qcow_version >= 3 && !s->snapshots && !s->nb_bitmaps &&
         3 + l1_clusters <= s->refcount_block_size &&
-        s->crypt_method_header != QCOW_CRYPT_LUKS) {
+        s->crypt_method_header != QCOW_CRYPT_LUKS &&
+        !has_data_file(bs)) {
         /* The following function only works for qcow2 v3 images (it
          * requires the dirty flag) and only as long as there are no
          * features that reserve extra clusters (such as snapshots,
          * LUKS header, or persistent bitmaps), because it completely
          * empties the image.  Furthermore, the L1 table and three
          * additional clusters (image header, refcount table, one
-         * refcount block) have to fit inside one refcount block. */
+         * refcount block) have to fit inside one refcount block. It
+         * only resets the image file, i.e. does not work with an
+         * external data file. */
         return make_completely_empty(bs);
     }
 
