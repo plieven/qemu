@@ -41,6 +41,8 @@
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qstring.h"
 #include "sysemu/sysemu.h"
+#include "block/thread-pool.h"
+#include "block/raw-aio.h"
 
 #include "quobyte.h"
 
@@ -59,50 +61,116 @@ typedef struct QuobyteClient {
     char *filename;
 } QuobyteClient;
 
-typedef struct QuobyteRequest {
-  int result;
-  int complete;
-  struct quobyte_iocb iocb;
-  Coroutine *co;
-  QEMUBH *bh;
-  QuobyteClient *client;
-} QuobyteRequest;
+typedef struct QuobyteAIORequest {
+    BlockDriverState *bs;
+    int aio_type;
+    uint64_t offset;
+    uint64_t bytes;
+    QEMUIOVector *qiov;
+    int flags;
+} QuobyteAIORequest;
 
-#define QUOBYTE_CONCURRENT_REQS 8
-
-static void quobyte_co_generic_bh_cb(void *opaque)
+static int quobyte_aio_worker(void *arg)
 {
-    QuobyteRequest *req = opaque;
-    req->complete = 1;
-    qemu_bh_delete(req->bh);
-    qemu_coroutine_enter(req->co);
-}
+    QuobyteAIORequest *req = arg;
+    QuobyteClient *client = req->bs->opaque;
+    int ret = -EINVAL;
+    char *buf = NULL;
+    bool mybuffer = false;
 
-static void
-quobyte_co_generic_cb(QuobyteRequest *req, int ret)
-{
-    req->result = ret;
-    if (req->co) {
-        req->bh = aio_bh_new(req->client->aio_context,
-                             quobyte_co_generic_bh_cb, req);
-        qemu_bh_schedule(req->bh);
-    } else {
-        req->complete = 1;
+    if (req->qiov) {
+        if (req->qiov->niov > 1 || req->aio_type == QEMU_AIO_WRITE) {
+            buf = qemu_try_blockalign(req->bs, req->bytes);
+            if (buf == NULL) {
+                return -ENOMEM;
+            }
+            mybuffer = true;
+        } else {
+            buf = req->qiov->iov[0].iov_base;
+        }
     }
+
+    switch (req->aio_type) {
+    case QEMU_AIO_READ:
+        ret = quobyte_read(client->fh, buf, req->offset, req->bytes);
+
+        if (ret > req->bytes || ret < 0) {
+            ret = -EIO;
+            break;
+        }
+
+        if (mybuffer) {
+            qemu_iovec_from_buf(req->qiov, 0, buf, ret);
+        }
+
+        /* zero pad short reads */
+        if (ret < req->qiov->size) {
+            qemu_iovec_memset(req->qiov, ret, 0, req->bytes - ret);
+        }
+
+        ret = 0;
+        break;
+    case QEMU_AIO_WRITE:
+        qemu_iovec_to_buf(req->qiov, 0, buf, req->qiov->size);
+
+        ret = quobyte_write(client->fh, buf, req->offset, req->bytes, !!(req->flags & BDRV_REQ_FUA));
+        if (ret != req->bytes) {
+            ret = -EIO;
+            break;
+        }
+
+        ret = 0;
+        break;
+    case QEMU_AIO_FLUSH:
+        ret = quobyte_fsync(client->fh);
+        if (ret) {
+            ret = -EIO;
+        }
+        break;
+    case QEMU_AIO_DISCARD:
+        ret = quobyte_fallocate(client->fh, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                                req->offset, req->bytes);
+        if (ret) {
+            ret = -EIO;
+        }
+        break;
+
+    default:
+        fprintf(stderr, "invalid qb request (0x%x)\n", req->aio_type);
+        break;
+    }
+
+    if (mybuffer) {
+        qemu_vfree(buf);
+    }
+
+    if (ret) {
+        fprintf(stderr, "quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d\n", req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno);
+    }
+
+    return ret;
 }
 
-static int quobyteAioContext = -1;
-
-static void quobyte_co_init_request(QuobyteClient *client, QuobyteRequest *req)
+static int coroutine_fn quobyte_submit_co(BlockDriverState *bs, int type,
+                          uint64_t offset, uint64_t bytes, QEMUIOVector *qiov, int flags)
 {
-    assert(quobyteAioContext >= 0);
-    *req = (QuobyteRequest) {
-        .co               = qemu_coroutine_self(),
-        .client           = client,
-        .iocb = (struct quobyte_iocb) { .io_context  = quobyteAioContext,
-                                        .file_handle = client->fh,
-                                      }
-    };
+    QuobyteAIORequest req = {};
+    QuobyteClient *client = bs->opaque;
+    ThreadPool *pool;
+
+    req.bs = bs;
+    req.aio_type = type;
+    req.offset = offset;
+    req.bytes = bytes;
+    req.flags = flags;
+
+    if (qiov) {
+        assert(qiov->size == bytes);
+    }
+    req.qiov = qiov;
+
+    pool = aio_get_thread_pool(client->aio_context);
+    return thread_pool_submit_co(pool, quobyte_aio_worker, &req);
 }
 
 static void quobyte_allocmap_free(QuobyteClient *client)
@@ -195,56 +263,8 @@ coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *iov,
                                int flags)
 {
-    QuobyteClient *client = bs->opaque;
-    QuobyteRequest req;
-
-    quobyte_co_init_request(client, &req);
-    req.iocb.op_code = QB_READ;
-    req.iocb.offset = offset;
-    req.iocb.length = bytes;
-
-    if (iov->niov > 1) {
-        req.iocb.buffer = g_malloc(bytes);
-    } else {
-        req.iocb.buffer = iov->iov[0].iov_base;
-    }
-
-    if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
-                                         (void*) quobyte_co_generic_cb, &req)) {
-        if (iov->niov > 1) {
-            g_free(req.iocb.buffer);
-        }
-        error_report("quobyte_co_preadv failed directly at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
-                     offset, bytes, flags, iov, client->filename);
-        return -EIO;
-    }
-
-    while (!req.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (req.result > iov->size || req.result < 0) {
-        if (iov->niov > 1) {
-            g_free(req.iocb.buffer);
-        }
-        error_report("quobyte_co_preadv failed with result %d at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
-                     req.result, offset, bytes, flags, iov, client->filename);
-        return -EIO;
-    }
-
-    if (iov->niov > 1) {
-        qemu_iovec_from_buf(iov, 0, req.iocb.buffer, req.result);
-        g_free(req.iocb.buffer);
-    }
-
-    /* zero pad short reads */
-    if (req.result < iov->size) {
-        qemu_iovec_memset(iov, req.result, 0, iov->size - req.result);
-    }
-
-    return 0;
+    return quobyte_submit_co(bs, QEMU_AIO_READ, offset, bytes, iov, flags);
 }
-
 
 static int
 coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
@@ -252,58 +272,21 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
                                 int flags)
 {
     QuobyteClient *client = bs->opaque;
-    QuobyteRequest req;
-
-    quobyte_co_init_request(client, &req);
-    req.iocb.op_code = (flags & BDRV_REQ_FUA) ? QB_WRITE_SYNC : QB_WRITE;
-    req.iocb.offset = offset;
-    req.iocb.length = bytes;
-    /* We sadly always have to create a bounce buffer since the guest may invalidate
-     * the page while we are writing the data to the DATA SERVICE. As Quobyte
-     * creates checksums for the payload this will lead to CRC errors otherwise. */
-    req.iocb.buffer = g_malloc(bytes);
-    qemu_iovec_to_buf(iov, 0, req.iocb.buffer, bytes);
-
-    if (req.iocb.op_code != QB_WRITE_SYNC) {
+    if (!(flags & BDRV_REQ_FUA)) {
         if (!client->unsynced_bytes) {
             client->first_unsynced_write = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         }
         client->unsynced_bytes += bytes;
     }
-
     quobyte_allocmap_set_allocated(client, offset, bytes);
-
-    if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
-                                         (void*) quobyte_co_generic_cb, &req)) {
-        g_free(req.iocb.buffer);
-        error_report("quobyte_co_pwritev failed directly at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
-                     offset, bytes, flags, iov, client->filename);
-        return -EIO;
-    }
-
-    while (!req.complete) {
-        qemu_coroutine_yield();
-    }
-
-    g_free(req.iocb.buffer);
-
-    if (req.result != bytes) {
-        error_report("quobyte_co_writev failed with result %d at offset %" PRIu64" bytes %" PRIu64 " flags %d iov %p filename %s",
-                     req.result, offset, bytes, flags, iov, client->filename);
-        return -EIO;
-    }
-
-    return 0;
+    return quobyte_submit_co(bs, QEMU_AIO_WRITE, offset, bytes, iov, flags);
 }
 
 static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
 {
     QuobyteClient *client = bs->opaque;
-    QuobyteRequest req;
     int64_t sync_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->last_sync;
     int64_t write_age = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - client->first_unsynced_write;
-    quobyte_co_init_request(client, &req);
-    req.iocb.op_code = QB_FSYNC;
 
     if (client->unsynced_bytes >= 1048576 && write_age > 10000) {
         error_report("quobyte_co_flush: last_sync %ld ms ago, first_unsynced_write %ld ms ago, unsynced bytes %" PRIu64,
@@ -312,59 +295,26 @@ static int coroutine_fn quobyte_co_flush(BlockDriverState *bs)
     client->unsynced_bytes = 0;
     client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-    if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
-                                         (void*) quobyte_co_generic_cb, &req)) {
-        error_report("quobyte_co_flush failed directly");
-        return -EIO;
-    }
-
-    while (!req.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (req.result) {
-        error_report("quobyte_co_flush failed with result %d", req.result);
-        return -EIO;
-    }
-
-    return 0;
+    return quobyte_submit_co(bs, QEMU_AIO_FLUSH, 0, 0, NULL, 0);
 }
 
 static int
 coroutine_fn quobyte_co_pdiscard_internal(BlockDriverState *bs, int64_t offset, int count)
 {
     QuobyteClient *client = bs->opaque;
-    QuobyteRequest req;
+    int ret;
 
     if (!client->has_discard) {
         return -ENOTSUP;
     }
 
-    quobyte_co_init_request(client, &req);
-    req.iocb.op_code = QB_FALLOCATE;
-    req.iocb.offset = offset;
-    req.iocb.length = count;
-    req.iocb.mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+    ret = quobyte_submit_co(bs, QEMU_AIO_DISCARD, offset, count, NULL, 0);
 
-    if (quobyte_aio_submit_with_callback(quobyteAioContext, &req.iocb,
-                                         (void*) quobyte_co_generic_cb, &req)) {
-        return -EIO;
+    if (!ret) {
+        quobyte_allocmap_set_unallocated(client, offset, count);
     }
 
-    while (!req.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (req.result != count) {
-        client->has_discard = false;
-        error_report("quobyte_co_pdiscard_internal failed with result %d at offset %" PRIu64" count %d filename %s",
-                     req.result, offset, count, client->filename);
-        return -ENOTSUP;
-    }
-
-    quobyte_allocmap_set_unallocated(client, offset, count);
-
-    return 0;
+    return ret;
 }
 
 static int
@@ -444,10 +394,6 @@ static void quobyte_client_close(QuobyteClient *client)
         quobyte_close(client->fh);
     }
     if (!quobyteClients && quobyteRegistry) {
-        if (quobyteAioContext >= 0) {
-            quobyte_aio_destroy(quobyteAioContext);
-            quobyteAioContext = -1;
-        }
         quobyte_destroy_adapter();
         g_free(quobyteRegistry);
         quobyteRegistry = NULL;
@@ -572,19 +518,6 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
                           errp, bs->open_flags);
     if (ret < 0) {
         goto out;
-    }
-
-    if (quobyteAioContext < 0) {
-        int concurrent_reqs = QUOBYTE_CONCURRENT_REQS;
-        if (getenv("QUOBYTE_CONCURRENT_REQS")) {
-            concurrent_reqs = atoi(getenv("QUOBYTE_CONCURRENT_REQS"));
-            error_report("setting concurrent reqs to %d\n", concurrent_reqs);
-        }
-        quobyteAioContext = quobyte_aio_setup(concurrent_reqs);
-        if (quobyteAioContext < 0) {
-            ret = -errno;
-            goto out;
-        }
     }
 
     client->cluster_size = quobyte_get_object_size(client->fh);
