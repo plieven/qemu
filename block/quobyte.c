@@ -136,7 +136,7 @@ static int quobyte_aio_worker(void *arg)
         break;
 
     default:
-        fprintf(stderr, "invalid qb request (0x%x)\n", req->aio_type);
+        error_report("invalid qb request (0x%x)\n", req->aio_type);
         break;
     }
 
@@ -145,7 +145,8 @@ static int quobyte_aio_worker(void *arg)
     }
 
     if (ret) {
-        fprintf(stderr, "quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d\n", req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno);
+        error_report("quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d\n",
+                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno);
     }
 
     return ret;
