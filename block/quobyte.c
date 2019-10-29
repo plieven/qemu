@@ -80,7 +80,7 @@ static int quobyte_aio_worker(void *arg)
 
     if (req->qiov) {
         if (req->qiov->niov > 1 || req->aio_type == QEMU_AIO_WRITE) {
-            buf = qemu_try_blockalign(req->bs, req->bytes);
+            buf = g_try_malloc(req->bytes);
             if (buf == NULL) {
                 return -ENOMEM;
             }
@@ -141,7 +141,7 @@ static int quobyte_aio_worker(void *arg)
     }
 
     if (mybuffer) {
-        qemu_vfree(buf);
+        g_free(buf);
     }
 
     if (ret) {
