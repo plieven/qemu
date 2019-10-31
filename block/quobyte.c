@@ -764,7 +764,6 @@ static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
 static void coroutine_fn quobyte_co_invalidate_cache (BlockDriverState *bs,
                                                       Error **errp) {
     QuobyteClient *client = bs->opaque;
-    error_report("quobyte_inactivate");
     error_report("quobyte_co_invalidate_cache");
     quobyte_allocmap_init(client);
     quobyte_read_metadata(client);
