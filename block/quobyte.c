@@ -689,6 +689,12 @@ static int coroutine_fn quobyte_file_co_create_opts(const char *url, QemuOpts *o
         goto out;
     }
     ret = quobyte_ftruncate(client->fh, total_size) ? -errno : 0;
+    if (!ret) {
+        client->cluster_size = quobyte_get_object_size(client->fh);
+        assert(client->cluster_size > 0);
+        quobyte_allocmap_init(client);
+        quobyte_allocmap_set_unallocated(client, 0, total_size);
+    }
 out:
     quobyte_client_close(client);
     g_free(client);
