@@ -70,21 +70,27 @@ typedef struct QuobyteAIORequest {
     int flags;
 } QuobyteAIORequest;
 
+#define STACKBUF_MAX 4096
+
 static int quobyte_aio_worker(void *arg)
 {
     QuobyteAIORequest *req = arg;
     QuobyteClient *client = req->bs->opaque;
     int ret = -EINVAL;
-    char *buf = NULL;
-    bool mybuffer = false;
+    char *buf = NULL, *local_buf = NULL;
+    char stackbuf[STACKBUF_MAX];
 
     if (req->qiov) {
         if (req->qiov->niov > 1 || req->aio_type == QEMU_AIO_WRITE) {
-            buf = g_try_malloc(req->bytes);
-            if (buf == NULL) {
-                return -ENOMEM;
+            if (req->bytes <= STACKBUF_MAX) {
+                buf = &stackbuf[0];
+            } else {
+                buf = g_try_malloc(req->bytes);
+                if (buf == NULL) {
+                    return -ENOMEM;
+                }
+                local_buf = buf;
             }
-            mybuffer = true;
         } else {
             buf = req->qiov->iov[0].iov_base;
         }
@@ -99,7 +105,7 @@ static int quobyte_aio_worker(void *arg)
             break;
         }
 
-        if (mybuffer) {
+        if (buf != req->qiov->iov[0].iov_base) {
             qemu_iovec_from_buf(req->qiov, 0, buf, ret);
         }
 
@@ -140,9 +146,7 @@ static int quobyte_aio_worker(void *arg)
         break;
     }
 
-    if (mybuffer) {
-        g_free(buf);
-    }
+    g_free(local_buf);
 
     if (ret) {
         error_report("quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d\n",
