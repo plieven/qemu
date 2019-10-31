@@ -59,6 +59,8 @@ typedef struct QuobyteClient {
     unsigned long *allocmap; /* the allocmap has only hint character */
     long allocmap_size;
     char *filename;
+    char *path;
+    char *metadata_path;
 } QuobyteClient;
 
 typedef struct QuobyteAIORequest {
@@ -263,6 +265,18 @@ quobyte_allocmap_is_allocated(QuobyteClient *client, int64_t offset,
                            offset / client->cluster_size) == size);
 }
 
+static void
+quobyte_allocmap_count_allocated(QuobyteClient *client)
+{
+    if (client->allocmap == NULL) {
+        return;
+    }
+    error_report("quobyte file %s has approximately %lu of %lu clusters allocated", client->path,
+                 slow_bitmap_count_one(client->allocmap, client->allocmap_size),
+                 client->allocmap_size);
+}
+
+
 static int
 coroutine_fn quobyte_co_preadv(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *iov,
@@ -386,6 +400,105 @@ static QemuOptsList runtime_opts = {
 static char *quobyteRegistry;
 static unsigned quobyteClients;
 
+// QEMUQBM char[7]
+// version uint8_t
+// filesize uint64_t
+// clustersize uint32_t
+// file_id char[64]
+// allocmaphint uint8_t[BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long)]
+
+static void quobyte_write_metadata(QuobyteClient *client) {
+    struct quobyte_fh *fh;
+    ssize_t file_id_sz;
+    char file_id[64] = {};
+    if (!client->metadata_path || !client->allocmap) {
+        return;
+    }
+    fh = quobyte_open(client->metadata_path, O_CREAT | O_RDWR | O_DIRECT, 0600);
+    if (!fh) {
+        return;
+    }
+    quobyte_write(fh, "QEMUQBM", 0, 7, false);
+    quobyte_write(fh, "\0", 7, 1, false);
+    quobyte_write(fh, (const void*)&client->st_size, 8, sizeof(client->st_size), false);
+    quobyte_write(fh, (const void*)&client->cluster_size, 16, sizeof(client->cluster_size), false);
+    if ((file_id_sz = quobyte_getxattr(client->path, "quobyte.file_id", &file_id[0], sizeof(file_id) - 1)) < 0) {
+        error_report("quobyte file %s could not retrieve quobyte.file_id: %s (%d)\n", client->path, strerror(errno), errno);
+        return;
+    }
+    quobyte_write(fh, &file_id[0], 20, sizeof(file_id), false);
+    quobyte_write(fh, (const void*)client->allocmap, 84, BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long), false);
+    quobyte_close(fh);
+    quobyte_allocmap_count_allocated(client);
+    error_report("quobyte metadata written to %s", client->metadata_path);
+}
+
+static void quobyte_read_metadata(QuobyteClient *client) {
+    struct quobyte_fh *fh;
+    ssize_t file_id_sz;
+    char file_id[64] = {};
+    ssize_t allocmap_size;
+    char buf[64];
+    assert(sizeof(client->st_size) == 8);
+    assert(sizeof(client->cluster_size) == 4);
+    if (!client->metadata_path || !client->allocmap) {
+        return;
+    }
+    fh = quobyte_open(client->metadata_path, O_RDONLY, 0600);
+    if (!fh) {
+        return;
+    }
+    if (quobyte_read(fh, buf, 0, 7) != 7) {
+        goto err;
+    }
+    if (memcmp(buf, "QEMUQBM", 7)) {
+        goto err;
+    }
+    if (quobyte_read(fh, buf, 7, 1) != 1) {
+        goto err;
+    }
+    if (buf[0] != 0) {
+        goto err;
+    }
+    if (quobyte_read(fh, buf, 8, sizeof(client->st_size)) != sizeof(client->st_size)) {
+        goto err;
+    }
+    if (memcmp(buf, (const void*)&client->st_size, 8)) {
+        error_report("cannot use quobyte metadata from %s, filesize has changed", client->metadata_path);
+        return;
+    }
+    if (quobyte_read(fh, buf, 16, sizeof(client->cluster_size)) != sizeof(client->cluster_size)) {
+        goto err;
+    }
+    if (memcmp(buf, (const void*)&client->cluster_size, 4)) {
+        error_report("cannot use quobyte metadata from %s, clustersize has changed", client->metadata_path);
+        return;
+    }
+    if ((file_id_sz = quobyte_getxattr(client->path, "quobyte.file_id", &file_id[0], sizeof(file_id) - 1)) < 0) {
+        error_report("quobyte file %s could not retrieve quobyte.file_id: %s (%d)\n", client->path, strerror(errno), errno);
+        return;
+    }
+    if (quobyte_read(fh, buf, 20, sizeof(file_id)) != sizeof(file_id)) {
+        goto err;
+    }
+    if (memcmp(buf, file_id, sizeof(file_id))) {
+        error_report("cannot use quobyte metadata from %s, file_id has changed", client->metadata_path);
+        return;
+    }
+    allocmap_size = BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long);
+    if (quobyte_read(fh, (void*)client->allocmap, 84, allocmap_size) != allocmap_size) {
+        quobyte_allocmap_init(client);
+        goto err;
+    }
+    quobyte_close(fh);
+    error_report("quobyte metadata read from %s", client->metadata_path);
+    quobyte_allocmap_count_allocated(client);
+    return;
+err:
+    error_report("failed to read quobyte metadata from %s", client->metadata_path);
+    return;
+}
+
 static void quobyte_client_close(QuobyteClient *client)
 {
     quobyteClients--;
@@ -397,6 +510,7 @@ static void quobyte_client_close(QuobyteClient *client)
                          sync_age, write_age, client->unsynced_bytes);
         }
         quobyte_close(client->fh);
+        quobyte_write_metadata(client);
     }
     if (!quobyteClients && quobyteRegistry) {
         quobyte_destroy_adapter();
@@ -405,6 +519,8 @@ static void quobyte_client_close(QuobyteClient *client)
     }
     quobyte_allocmap_free(client);
     g_free(client->filename);
+    g_free(client->path);
+    g_free(client->metadata_path);
     memset(client, 0, sizeof(QuobyteClient));
 }
 
@@ -493,6 +609,8 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     client->has_discard = true;
     client->last_sync = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     client->filename = g_strdup(filename);
+    client->path = g_strdup(uri->path);
+    client->metadata_path = g_strdup_printf("%s.qemu_md", client->path);
 
     goto out;
 fail:
@@ -529,6 +647,7 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
     assert(client->cluster_size > 0);
 
     quobyte_allocmap_init(client);
+    quobyte_read_metadata(client);
 
     bs->total_sectors = ret;
     bs->supported_write_flags = BDRV_REQ_FUA;
@@ -603,6 +722,7 @@ quobyte_file_co_truncate(BlockDriverState *bs, int64_t offset,
 
     client->st_size = offset;
     quobyte_allocmap_init(client);
+    quobyte_write_metadata(client);
 
     return 0;
 }
@@ -641,6 +761,25 @@ static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
     bs->bl.max_pdiscard = 1 << 26; /* 64 MByte */
 }
 
+static void coroutine_fn quobyte_co_invalidate_cache (BlockDriverState *bs,
+                                                      Error **errp) {
+    QuobyteClient *client = bs->opaque;
+    error_report("quobyte_inactivate");
+    error_report("quobyte_co_invalidate_cache");
+    quobyte_allocmap_init(client);
+    quobyte_read_metadata(client);
+}
+
+static int quobyte_inactivate(BlockDriverState *bs) {
+    QuobyteClient *client = bs->opaque;
+    error_report("quobyte_inactivate");
+    quobyte_write_metadata(client);
+    g_free(client->metadata_path);
+    client->metadata_path = NULL;
+    return 0;
+}
+
+
 static BlockDriver bdrv_quobyte = {
     .format_name                    = "quobyte",
     .protocol_name                  = "quobyte",
@@ -665,6 +804,9 @@ static BlockDriver bdrv_quobyte = {
     .bdrv_co_flush_to_disk          = quobyte_co_flush,
     .bdrv_co_pdiscard               = quobyte_co_pdiscard,
     .bdrv_co_pwrite_zeroes          = quobyte_co_pwrite_zeroes,
+
+    .bdrv_co_invalidate_cache       = quobyte_co_invalidate_cache,
+    .bdrv_inactivate                = quobyte_inactivate,
 
     .bdrv_attach_aio_context        = quobyte_attach_aio_context,
     .bdrv_detach_aio_context        = quobyte_detach_aio_context,
