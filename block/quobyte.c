@@ -569,7 +569,7 @@ static int coroutine_fn quobyte_file_co_create_opts(const char *url, QemuOpts *o
     if (ret < 0) {
         goto out;
     }
-    ret = quobyte_ftruncate(client->fh, total_size) ? errno : 0;
+    ret = quobyte_ftruncate(client->fh, total_size) ? -errno : 0;
 out:
     quobyte_client_close(client);
     g_free(client);
