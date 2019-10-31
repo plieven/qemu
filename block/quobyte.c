@@ -271,9 +271,9 @@ quobyte_allocmap_count_allocated(QuobyteClient *client)
     if (client->allocmap == NULL) {
         return;
     }
-    error_report("quobyte file %s has approximately %lu of %lu clusters allocated", client->path,
-                 slow_bitmap_count_one(client->allocmap, client->allocmap_size),
-                 client->allocmap_size);
+    fprintf(stderr, "quobyte file %s has approximately %lu of %lu clusters allocated\n",
+            client->path, slow_bitmap_count_one(client->allocmap, client->allocmap_size),
+            client->allocmap_size);
 }
 
 
@@ -430,7 +430,7 @@ static void quobyte_write_metadata(QuobyteClient *client) {
     quobyte_write(fh, (const void*)client->allocmap, 84, BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long), false);
     quobyte_close(fh);
     quobyte_allocmap_count_allocated(client);
-    error_report("quobyte metadata written to %s", client->metadata_path);
+    fprintf(stderr, "quobyte metadata written to %s\n", client->metadata_path);
 }
 
 static void quobyte_read_metadata(QuobyteClient *client) {
@@ -491,7 +491,7 @@ static void quobyte_read_metadata(QuobyteClient *client) {
         goto err;
     }
     quobyte_close(fh);
-    error_report("quobyte metadata read from %s", client->metadata_path);
+    fprintf(stderr, "quobyte metadata read from %s\n", client->metadata_path);
     quobyte_allocmap_count_allocated(client);
     return;
 err:
@@ -764,14 +764,14 @@ static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
 static void coroutine_fn quobyte_co_invalidate_cache (BlockDriverState *bs,
                                                       Error **errp) {
     QuobyteClient *client = bs->opaque;
-    error_report("quobyte_co_invalidate_cache");
+    fprintf(stderr, "quobyte_co_invalidate_cache invoked\n");
     quobyte_allocmap_init(client);
     quobyte_read_metadata(client);
 }
 
 static int quobyte_inactivate(BlockDriverState *bs) {
     QuobyteClient *client = bs->opaque;
-    error_report("quobyte_inactivate");
+    fprintf(stderr, "quobyte_inactivate invoked\n");
     quobyte_write_metadata(client);
     g_free(client->metadata_path);
     client->metadata_path = NULL;
