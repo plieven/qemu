@@ -644,7 +644,6 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     client->cluster_size = quobyte_get_object_size(client->fh);
-    assert(client->cluster_size > 0);
 
     quobyte_allocmap_init(client);
     quobyte_read_metadata(client);
@@ -691,7 +690,7 @@ static int coroutine_fn quobyte_file_co_create_opts(const char *url, QemuOpts *o
     ret = quobyte_ftruncate(client->fh, total_size) ? -errno : 0;
     if (!ret) {
         client->cluster_size = quobyte_get_object_size(client->fh);
-        assert(client->cluster_size > 0);
+        client->st_size = total_size;
         quobyte_allocmap_init(client);
         quobyte_allocmap_set_unallocated(client, 0, total_size);
     }
