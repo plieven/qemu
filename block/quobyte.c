@@ -747,6 +747,7 @@ quobyte_file_co_truncate(BlockDriverState *bs, int64_t offset,
                          PreallocMode prealloc, Error **errp)
 {
     QuobyteClient *client = bs->opaque;
+    uint64_t old_size = client->st_size;
     int ret;
 
     if (prealloc != PREALLOC_MODE_OFF) {
@@ -762,8 +763,14 @@ quobyte_file_co_truncate(BlockDriverState *bs, int64_t offset,
     }
 
     client->st_size = offset;
-    quobyte_allocmap_init(client);
-    quobyte_write_metadata(client);
+    if (offset > old_size) {
+        fprintf(stderr, "quobyte_file_co_truncate: size increased from %" PRIu64" to %" PRIu64 ". threating new clusters as unallocated\n", old_size, client->st_size);
+        client->allocmap_size = DIV_ROUND_UP(client->st_size, client->cluster_size);
+        client->allocmap = g_try_realloc(client->allocmap, BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long));
+        quobyte_allocmap_set_unallocated(client, old_size, client->st_size - old_size);
+    } else if (offset < old_size) {
+        quobyte_allocmap_init(client);
+    }
 
     return 0;
 }
