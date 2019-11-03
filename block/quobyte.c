@@ -412,7 +412,7 @@ static char *quobyteRegistry;
 static unsigned quobyteClients;
 
 // QEMUQBM char[7]
-// version uint8_t
+// flags uint8_t (bit 1 = active)
 // filesize uint64_t
 // clustersize uint32_t
 // file_id char[64]
@@ -423,6 +423,8 @@ static void quobyte_write_metadata(QuobyteClient *client) {
     ssize_t file_id_sz;
     char file_id[64] = {};
     int flags = O_RDWR | O_DIRECT;
+    uint8_t md_flags = 0x0;
+
     if (!client->metadata_path || !client->allocmap) {
         return;
     }
@@ -438,7 +440,7 @@ static void quobyte_write_metadata(QuobyteClient *client) {
         return;
     }
     quobyte_write(fh, "QEMUQBM", 0, 7, false);
-    quobyte_write(fh, "\0", 7, 1, false);
+    quobyte_write(fh, (const void*)&md_flags, 7, 1, false);
     quobyte_write(fh, (const void*)&client->st_size, 8, sizeof(client->st_size), false);
     quobyte_write(fh, (const void*)&client->cluster_size, 16, sizeof(client->cluster_size), false);
     if ((file_id_sz = quobyte_getxattr(client->path, "quobyte.file_id", &file_id[0], sizeof(file_id) - 1)) < 0) {
@@ -476,7 +478,8 @@ static void quobyte_read_metadata(QuobyteClient *client) {
     if (quobyte_read(fh, buf, 7, 1) != 1) {
         goto err;
     }
-    if (buf[0] != 0) {
+    if (buf[0] & 1) {
+        fprintf(stderr, "cannot trust metadata from active client, maybe we recover from a crash?\n");
         goto err;
     }
     if (quobyte_read(fh, buf, 8, sizeof(client->st_size)) != sizeof(client->st_size)) {
@@ -506,14 +509,20 @@ static void quobyte_read_metadata(QuobyteClient *client) {
     }
     allocmap_size = BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long);
     if (quobyte_read(fh, (void*)client->allocmap, 84, allocmap_size) != allocmap_size) {
-        quobyte_allocmap_init(client);
         goto err;
     }
+    /* set active */
+    buf[0] = 0x1;
+    if (quobyte_write(fh, buf, 7, 1, false) != 1) {
+        goto err;
+    }
+
     quobyte_close(fh);
     fprintf(stderr, "quobyte metadata read from %s\n", client->metadata_path);
     quobyte_allocmap_count_allocated(client);
     return;
 err:
+    quobyte_allocmap_init(client);
     error_report("failed to read quobyte metadata from %s", client->metadata_path);
     return;
 }
@@ -664,8 +673,10 @@ static int quobyte_file_open(BlockDriverState *bs, QDict *options, int flags,
 
     client->cluster_size = quobyte_get_object_size(client->fh);
 
-    quobyte_allocmap_init(client);
-    quobyte_read_metadata(client);
+    if (!(flags & BDRV_O_INACTIVE)) {
+        quobyte_allocmap_init(client);
+        quobyte_read_metadata(client);
+    }
 
     bs->total_sectors = ret;
     bs->supported_write_flags = BDRV_REQ_FUA;
