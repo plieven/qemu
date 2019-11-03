@@ -299,6 +299,10 @@ coroutine_fn quobyte_co_pwritev(BlockDriverState *bs, uint64_t offset,
         }
         client->unsynced_bytes += bytes;
     }
+    if (offset + bytes > client->st_size) {
+        quobyte_allocmap_free(client);
+        client->st_size = offset + bytes;
+    }
     quobyte_allocmap_set_allocated(client, offset, bytes);
     return quobyte_submit_co(bs, QEMU_AIO_WRITE, offset, bytes, iov, flags);
 }
@@ -379,7 +383,12 @@ static int
 coroutine_fn quobyte_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                       int count, BdrvRequestFlags flags)
 {
+    QuobyteClient *client = bs->opaque;
     if (flags & BDRV_REQ_MAY_UNMAP) {
+        if (offset + count > client->st_size) {
+            quobyte_allocmap_free(client);
+            client->st_size = offset + count;
+        }
         return quobyte_co_pdiscard_internal(bs, offset, count);
     }
     return -ENOTSUP;
