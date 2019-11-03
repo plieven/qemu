@@ -265,15 +265,17 @@ quobyte_allocmap_is_allocated(QuobyteClient *client, int64_t offset,
                            offset / client->cluster_size) == size);
 }
 
-static void
+static long
 quobyte_allocmap_count_allocated(QuobyteClient *client)
 {
+    long allocated = -1;
     if (client->allocmap == NULL) {
-        return;
+        return -1;
     }
+    allocated = slow_bitmap_count_one(client->allocmap, client->allocmap_size);
     fprintf(stderr, "quobyte file %s has approximately %lu of %lu clusters allocated\n",
-            client->path, slow_bitmap_count_one(client->allocmap, client->allocmap_size),
-            client->allocmap_size);
+            client->path, allocated, client->allocmap_size);
+    return allocated;
 }
 
 
@@ -411,11 +413,19 @@ static void quobyte_write_metadata(QuobyteClient *client) {
     struct quobyte_fh *fh;
     ssize_t file_id_sz;
     char file_id[64] = {};
+    int flags = O_RDWR | O_DIRECT;
     if (!client->metadata_path || !client->allocmap) {
         return;
     }
-    fh = quobyte_open(client->metadata_path, O_CREAT | O_RDWR | O_DIRECT, 0600);
+    if (quobyte_allocmap_count_allocated(client) < client->allocmap_size) {
+        /* only create the matadata file if there are unallocated sectors */
+        flags |= O_CREAT;
+    }
+    fh = quobyte_open(client->metadata_path, flags, 0600);
     if (!fh) {
+        if (flags & O_CREAT) {
+            error_report("failed to create quobyte metadata file %s", client->metadata_path);
+        }
         return;
     }
     quobyte_write(fh, "QEMUQBM", 0, 7, false);
@@ -429,7 +439,7 @@ static void quobyte_write_metadata(QuobyteClient *client) {
     quobyte_write(fh, &file_id[0], 20, sizeof(file_id), false);
     quobyte_write(fh, (const void*)client->allocmap, 84, BITS_TO_LONGS(client->allocmap_size) * sizeof(unsigned long), false);
     quobyte_close(fh);
-    quobyte_allocmap_count_allocated(client);
+
     fprintf(stderr, "quobyte metadata written to %s\n", client->metadata_path);
 }
 
