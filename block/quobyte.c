@@ -465,7 +465,7 @@ static void quobyte_read_metadata(QuobyteClient *client) {
     if (!client->metadata_path || !client->allocmap) {
         return;
     }
-    fh = quobyte_open(client->metadata_path, O_RDONLY, 0600);
+    fh = quobyte_open(client->metadata_path, O_RDWR | O_DIRECT, 0600);
     if (!fh) {
         return;
     }
