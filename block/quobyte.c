@@ -445,6 +445,9 @@ static void quobyte_write_metadata(QuobyteClient *client) {
     quobyte_write(fh, (const void*)&client->cluster_size, 16, sizeof(client->cluster_size), false);
     if ((file_id_sz = quobyte_getxattr(client->path, "quobyte.file_id", &file_id[0], sizeof(file_id) - 1)) < 0) {
         error_report("quobyte file %s could not retrieve quobyte.file_id: %s (%d)\n", client->path, strerror(errno), errno);
+        if (fh) {
+            quobyte_close(fh);
+        }
         return;
     }
     quobyte_write(fh, &file_id[0], 20, sizeof(file_id), false);
@@ -522,6 +525,9 @@ static void quobyte_read_metadata(QuobyteClient *client) {
     quobyte_allocmap_count_allocated(client);
     return;
 err:
+    if (fh) {
+        quobyte_close(fh);
+    }
     quobyte_allocmap_init(client);
     error_report("failed to read quobyte metadata from %s", client->metadata_path);
     return;
