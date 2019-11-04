@@ -533,6 +533,21 @@ err:
     return;
 }
 
+static int quobyte_lock_fcntl(struct quobyte_fh *fh, int64_t start, int64_t len, int cmd, int fl_type)
+{
+    int ret;
+    struct flock fl = {
+        .l_whence = SEEK_SET,
+        .l_start  = start,
+        .l_len    = len,
+        .l_type   = fl_type,
+    };
+    do {
+        ret = quobyte_lock(fh, cmd, &fl);
+    } while (ret == -1 && errno == EINTR);
+    return ret == -1 ? -errno : 0;
+}
+
 static void quobyte_client_close(QuobyteClient *client)
 {
     quobyteClients--;
@@ -635,6 +650,14 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
     if (ret) {
         error_setg(errp, "Failed to fstat file: %s", strerror(-ret));
         goto fail;
+    }
+
+    if (!(flags & BDRV_O_INACTIVE) && st.st_size) {
+        ret = quobyte_lock_fcntl(client->fh, 0, 1, F_SETLK, F_WRLCK);
+        if (ret) {
+            error_setg(errp, "Could not set exclusive lock, is another process using this image?");
+            goto fail;
+        }
     }
 
     ret = DIV_ROUND_UP(st.st_size, BDRV_SECTOR_SIZE);
@@ -809,10 +832,14 @@ static void quobyte_refresh_limits(BlockDriverState *bs, Error **errp)
     bs->bl.max_pdiscard = 1 << 26; /* 64 MByte */
 }
 
-static void coroutine_fn quobyte_co_invalidate_cache (BlockDriverState *bs,
-                                                      Error **errp) {
+static void coroutine_fn quobyte_co_invalidate_cache(BlockDriverState *bs,
+                                                     Error **errp) {
     QuobyteClient *client = bs->opaque;
     fprintf(stderr, "quobyte_co_invalidate_cache invoked\n");
+    if (quobyte_lock_fcntl(client->fh, 0, 1, F_SETLK, F_WRLCK)) {
+        error_setg(errp, "Could not set exclusive lock, is another process using this image?");
+        return;
+    }
     quobyte_allocmap_init(client);
     quobyte_read_metadata(client);
 }
@@ -823,6 +850,7 @@ static int quobyte_inactivate(BlockDriverState *bs) {
     quobyte_write_metadata(client);
     g_free(client->metadata_path);
     client->metadata_path = NULL;
+    quobyte_lock_fcntl(client->fh, 0, 1, F_SETLK, F_UNLCK);
     return 0;
 }
 
