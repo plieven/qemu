@@ -652,7 +652,7 @@ static int64_t quobyte_client_open(QuobyteClient *client, const char *filename,
         goto fail;
     }
 
-    if (!(flags & BDRV_O_INACTIVE) && st.st_size) {
+    if (!(open_flags & BDRV_O_INACTIVE) && st.st_size) {
         ret = quobyte_lock_fcntl(client->fh, 0, 1, F_SETLK, F_WRLCK);
         if (ret) {
             error_setg(errp, "Could not set exclusive lock, is another process using this image?");
