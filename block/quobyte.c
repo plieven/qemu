@@ -73,6 +73,7 @@ typedef struct QuobyteAIORequest {
 } QuobyteAIORequest;
 
 #define STACKBUF_MAX 4096
+#define SLOW_REQUEST_MS 5000
 
 static int quobyte_aio_worker(void *arg)
 {
@@ -81,6 +82,7 @@ static int quobyte_aio_worker(void *arg)
     int ret = -EINVAL;
     char *buf = NULL, *local_buf = NULL;
     char stackbuf[STACKBUF_MAX];
+    int64_t req_time, req_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     if (req->qiov) {
         if (req->qiov->niov > 1 || req->aio_type == QEMU_AIO_WRITE) {
@@ -150,9 +152,14 @@ static int quobyte_aio_worker(void *arg)
 
     g_free(local_buf);
 
+    req_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - req_start;
+
     if (ret) {
-        error_report("quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d\n",
-                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno);
+        error_report("quobyte_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
+                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
+    } else if (req_time >= SLOW_REQUEST_MS) {
+        error_report("quobyte_aio_worker SLOW request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
+                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
     }
 
     return ret;
