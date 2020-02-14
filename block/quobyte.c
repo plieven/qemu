@@ -489,7 +489,7 @@ static void quobyte_read_metadata(QuobyteClient *client) {
         goto err;
     }
     if (buf[0] & 1) {
-        fprintf(stderr, "cannot trust metadata from active client, maybe we recover from a crash?\n");
+        error_report("cannot trust metadata from active client, maybe we recover from a crash?");
         goto err;
     }
     if (quobyte_read(fh, buf, 8, sizeof(client->st_size)) != sizeof(client->st_size)) {
