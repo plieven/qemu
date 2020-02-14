@@ -542,6 +542,9 @@ err:
 
 static int quobyte_lock_fcntl(struct quobyte_fh *fh, int64_t start, int64_t len, int cmd, int fl_type)
 {
+    /* XXX: file locking causes hangs on Quobyte server restart, disable it for now */
+    return 0;
+
     int ret;
     struct flock fl = {
         .l_whence = SEEK_SET,
