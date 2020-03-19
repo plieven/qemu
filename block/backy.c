@@ -290,8 +290,7 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     }
     s->chunk_dir = g_realloc(s->chunk_dir, strlen(s->chunk_dir) + 7);
     sprintf(s->chunk_dir, "%schunks", s->chunk_dir);
-
-    s->read_buf = qemu_blockalign(bs, s->block_size);
+    s->read_buf = qemu_blockalign(bs, s->block_size + s->block_size / 16 + 64 + 3);
 
     ret = 0;
 
@@ -377,6 +376,8 @@ backy_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
             }
 
             if (!chunk_buf) {
+                bool is_compressed = s->version != 2 || s->block_is_compressed[chunk_nr];
+
                 for (i = 0; i < BACKY_CACHE_SIZE; i++) {
                     if (s->cache_ts[i] < cache_min_ts) {
                         cache_min_ts = s->cache_ts[i];
@@ -390,25 +391,19 @@ backy_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
                     s->cache_chunk_buf[cache_min_slot] = qemu_blockalign(bs, s->block_size);
                 }
                 chunk_buf = s->cache_chunk_buf[cache_min_slot];
-
-                backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, s->version != 2 || s->block_is_compressed[chunk_nr]);
+open_again:
+                backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, is_compressed);
                 fd = open((char*)chunk_filename, O_RDONLY); //XXX: we need to use qemu open functions here
                 if (fd < 0) {
-                    if (s->version != 2 || s->block_is_compressed[chunk_nr]) {
+                    if (is_compressed || errno != ENOENT) {
                         error_report("could not open %s (%s)", chunk_filename, strerror(errno));
                         goto out;
                     }
-                    if (errno == ENOENT) {
-                        backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, 1);
-                        fd = open((char*)chunk_filename, O_RDONLY);
-                        if (fd < 0) {
-                            error_report("could not open %s (%s)", chunk_filename, strerror(errno));
-                            goto out;
-                        }
-                        s->block_is_compressed[chunk_nr] = 1;
-                    }
+                    is_compressed = true;
+                    s->block_is_compressed[chunk_nr] = 1;
+                    goto open_again;
                 }
-                rd_bytes = read(fd, s->block_is_compressed[chunk_nr] ? s->read_buf : chunk_buf, s->block_size);
+                rd_bytes = read(fd, is_compressed ? s->read_buf : chunk_buf, is_compressed ? s->block_size + s->block_size / 16 + 64 + 3 : s->block_size);
                 if (rd_bytes < 0) {
                     error_report("read failed at chunk %" PRIu64 "(%s)", chunk_nr, strerror(errno));
                     close(fd);
@@ -416,7 +411,7 @@ backy_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
                 }
                 close(fd);
 
-                if (s->block_is_compressed[chunk_nr]) {
+                if (is_compressed) {
                     uint64_t decompressed_size;
                     if (rd_bytes < 5 + 3 || s->read_buf[0] != 0xf0) {
                         error_report("lzo header error (length): seq %lu rd_bytes %ld", chunk_nr, rd_bytes);
