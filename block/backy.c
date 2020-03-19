@@ -139,6 +139,8 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     s->block_is_compressed = NULL;
     s->crc32c_expected = 0xffffffff;
 
+    qemu_mutex_init(&s->lock);
+
     /* No write support yet */
     ret = bdrv_apply_auto_read_only(bs, NULL, errp);
     if (ret < 0) {
@@ -259,7 +261,6 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
 
     bs->total_sectors = (int64_t) DIV_ROUND_UP(s->filesize, BDRV_SECTOR_SIZE);
 
-    qemu_mutex_init(&s->lock);
     backy_attach_aio_context(bs, bdrv_get_aio_context(bs));
 
 fail:
