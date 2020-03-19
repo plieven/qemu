@@ -128,9 +128,9 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     Error *local_err = NULL;
     int ret = -EINVAL;
     json_char *buf = NULL;
-    json_value* value = NULL;
-    long unsigned int i, j;
-    int k;
+    json_value* value = NULL, *mapping = NULL;
+    unsigned int i, j, k;
+    long lastseq = -1;
 
     s->version = 1;
     s->filesize = 0;     /* size of the uncompressed data */
@@ -181,6 +181,9 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         goto fail;
     }
 
+    s->zeroblock = g_malloc0(s->block_size);
+    mmh3(s->zeroblock, s->block_size, 0, &s->zeroblock_hash[0]);
+
     for (i = 0; i < value->u.object.length; i++) {
         json_char *name = value->u.object.values[i].name;
         json_value *val = value->u.object.values[i].value;
@@ -200,36 +203,17 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         } else if (val->type == json_object && !strcmp(name, "metadata")) {
             /* not needed */
         } else if (val->type == json_object && !strcmp(name, "mapping")) {
-            s->block_count = val->u.object.length;
-            s->block_mapping = g_malloc((DEDUP_MAC_SIZE_BYTES) * s->block_count);
-            s->block_is_compressed = g_malloc0(s->block_count);
-            for (j = 0; j < s->block_count; j++) {
-                json_value *entry = val->u.object.values[j].value;
-                unsigned long seq = strtoul(val->u.object.values[j].name, NULL, 0);
-                if (j != seq) {
-                    error_setg(errp, "json parser error: invalid sequence in mapping: expected %lu found %lu", j, seq);
-                    goto fail;
-                }
-                if (entry->type != json_string) {
-                    error_setg(errp, "json parser error: invalid json_type for mapping entry %lu", j);
-                    goto fail;
-                }
-                if (entry->u.string.length != DEDUP_MAC_SIZE / 4) {
-                    error_setg(errp, "json parser error: invalid mac size in mapping: expected %d found %d", DEDUP_MAC_SIZE / 4, entry->u.string.length);
-                    goto fail;
-                }
-                for (k = 0; k < DEDUP_MAC_SIZE_BYTES; k++) {
-                    s->block_mapping[seq * DEDUP_MAC_SIZE_BYTES + k] = (h2d[(int)entry->u.string.ptr[k * 2]] << 4) +
-                                                                        h2d[(int)entry->u.string.ptr[k * 2 + 1]];
-                }
+            if (s->version < 3) {
+                s->block_count = val->u.object.length;
             }
+            mapping = val;
         } else {
             error_setg(errp, "json parser error: unexpected token '%s' (type %d)", name, val->type);
             goto fail;
         }
     }
 
-    if (s->version < 1 || s->version > 2) {
+    if (s->version < 1 || s->version > 3) {
         error_setg(errp, "unsupported version %d", s->version);
         goto fail;
     }
@@ -237,14 +221,66 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         error_setg(errp, "unsupported version 1 block size %u", s->block_size);
         goto fail;
     }
-
-    if (s->block_count != (s->filesize + s->block_size - 1) / (s->block_size)) {
-        error_setg(errp, "invalid number of chunks: expected %lu found %lu", (s->filesize + s->block_size - 1) / (s->block_size), s->block_count);
+    if (!mapping) {
+        error_setg(errp, "json file lacks mapping object");
         goto fail;
     }
 
-    s->zeroblock = g_malloc0(s->block_size);
-    mmh3(s->zeroblock, s->block_size, 0, &s->zeroblock_hash[0]);
+    if (s->version < 3) {
+        if (s->block_count != (s->filesize + s->block_size - 1) / s->block_size) {
+            error_setg(errp, "invalid number of chunks: expected %lu found %lu", (s->filesize + s->block_size - 1) / (s->block_size), s->block_count);
+            goto fail;
+        }
+    } else {
+        s->block_count = (s->filesize + s->block_size - 1) / (s->block_size);
+    }
+
+    /* process mapping */
+    s->block_mapping = g_malloc((DEDUP_MAC_SIZE_BYTES) * s->block_count);
+    if (s->version == 2) {
+        s->block_is_compressed = g_malloc0(s->block_count);
+    }
+    if ((s->version < 3 && mapping->u.object.length  != s->block_count) || mapping->u.object.length > s->block_count) {
+        error_setg(errp, "json parser error: invalid number of mapping entries found: expected %lu found %u", s->block_count, mapping->u.object.length);
+        goto fail;
+    }
+    for (j = 0; j < mapping->u.object.length; j++) {
+        json_value *entry = mapping->u.object.values[j].value;
+        unsigned long seq = strtoul(mapping->u.object.values[j].name, NULL, 0);
+        if (seq >= s->block_count) {
+            error_setg(errp, "json parser error: invalid sequence in mapping: max %lu found %lu", s->block_count - 1, seq);
+            goto fail;
+        }
+        if (s->version > 2) {
+            for (k = lastseq + 1; k < seq; k++) {
+                memcpy(&s->block_mapping[k * DEDUP_MAC_SIZE_BYTES], &s->zeroblock_hash[0], DEDUP_MAC_SIZE_BYTES);
+                lastseq = k;
+            }
+        }
+        if (seq != lastseq + 1) {
+            error_setg(errp, "json parser error: invalid sequence in mapping: expected %lu found %lu", lastseq + 1, seq);
+            goto fail;
+        }
+        if (entry->type != json_string) {
+            error_setg(errp, "json parser error: invalid json_type for mapping entry %u", j);
+            goto fail;
+        }
+        if (entry->u.string.length != DEDUP_MAC_SIZE / 4) {
+            error_setg(errp, "json parser error: invalid mac size in mapping: expected %d found %d", DEDUP_MAC_SIZE / 4, entry->u.string.length);
+            goto fail;
+        }
+        for (k = 0; k < DEDUP_MAC_SIZE_BYTES; k++) {
+            s->block_mapping[seq * DEDUP_MAC_SIZE_BYTES + k] = (h2d[(int)entry->u.string.ptr[k * 2]] << 4) +
+                                                                h2d[(int)entry->u.string.ptr[k * 2 + 1]];
+        }
+        lastseq = seq;
+    }
+    if (s->version > 2) {
+        for (k = lastseq + 1; k < s->block_count; k++) {
+            memcpy(&s->block_mapping[k * DEDUP_MAC_SIZE_BYTES], &s->zeroblock_hash[0], DEDUP_MAC_SIZE_BYTES);
+            lastseq = k;
+        }
+    }
 
     s->chunk_dir = bdrv_dirname(bs, &local_err);
     if (local_err) {
@@ -355,10 +391,10 @@ backy_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
                 }
                 chunk_buf = s->cache_chunk_buf[cache_min_slot];
 
-                backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, s->block_is_compressed[chunk_nr]);
+                backy_dedup_hash_filename(s, chunk_filename, chunk_ptr, s->version != 2 || s->block_is_compressed[chunk_nr]);
                 fd = open((char*)chunk_filename, O_RDONLY); //XXX: we need to use qemu open functions here
                 if (fd < 0) {
-                    if (s->block_is_compressed[chunk_nr]) {
+                    if (s->version != 2 || s->block_is_compressed[chunk_nr]) {
                         error_report("could not open %s (%s)", chunk_filename, strerror(errno));
                         goto out;
                     }
