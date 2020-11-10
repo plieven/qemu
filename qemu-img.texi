@@ -191,6 +191,8 @@ sets the input file
 sets the output file
 @item skip=@var{blocks}
 sets the number of input blocks to skip
+@item seek=@var{blocks}
+sets the number of block to seek into the output
 @end table
 
 Command description:
@@ -390,7 +392,7 @@ way.
 The size can also be specified using the @var{size} option with @code{-o},
 it doesn't need to be specified separately in this case.
 
-@item dd [--image-opts] [-U] [-f @var{fmt}] [-O @var{output_fmt}] [bs=@var{block_size}] [count=@var{blocks}] [skip=@var{blocks}] if=@var{input} of=@var{output}
+@item dd [--image-opts] [-U] [-n] [-f @var{fmt}] [-O @var{output_fmt}] [bs=@var{block_size}] [count=@var{blocks}] [skip=@var{blocks}] [seek=@var{blocks}] if=@var{input} of=@var{output}
 
 Dd copies from @var{input} file to @var{output} file converting it from
 @var{fmt} format to @var{output_fmt} format.
@@ -400,6 +402,11 @@ modified by specifying @var{block_size}. If count=@var{blocks} is specified
 dd will stop reading input after reading @var{blocks} input blocks.
 
 The size syntax is similar to dd(1)'s size syntax.
+
+If the @code{-n} option is specified, the @var{output} file will not be overwritten.
+Note that he behaviour is not identical to original dd option conv=nocreat.
+The output is neither truncated nor is it possible to write past the end of an
+existing output file.
 
 @item info [--object @var{objectdef}] [--image-opts] [-f @var{fmt}] [--output=@var{ofmt}] [--backing-chain] [-U] @var{filename}
 
