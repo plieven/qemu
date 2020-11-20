@@ -1395,7 +1395,7 @@ static int vmdk_write_extent(VmdkExtent *extent, int64_t cluster_offset,
 
         compressed_data = g_malloc(n_bytes);
         qemu_iovec_to_buf(qiov, qiov_offset, compressed_data, n_bytes);
-        ret = compress(data->data, &buf_len, compressed_data, n_bytes);
+        ret = compress2(data->data, &buf_len, compressed_data, n_bytes, 1);
         g_free(compressed_data);
 
         if (ret != Z_OK || buf_len == 0) {
