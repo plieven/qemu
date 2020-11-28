@@ -478,6 +478,8 @@ static void qemu_rbd_finish_aiocb(rbd_completion_t c, RBDTask *task)
     task->ret = rbd_aio_get_return_value(c);
     rbd_aio_release(c);
 
+    //TODO: log errors and slow requests
+
     aio_bh_schedule_oneshot(task->s->aio_context, qemu_rbd_finish_bh, task);
 }
 
@@ -486,7 +488,7 @@ coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *qiov,
                                int flags)
 {
-    int r = -EIO;
+    int r, ret = -EIO;
     BDRVRBDState *s = bs->opaque;
     rbd_completion_t c;
     RBDTask task = { .s = s, .co = qemu_coroutine_self() };
@@ -505,7 +507,7 @@ coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
         qemu_coroutine_yield();
     }
 
-    if (task.ret > qiov->size || r < 0) {
+    if (task.ret > qiov->size || task.ret < 0) {
         goto out;
     }
 
@@ -514,9 +516,9 @@ coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
         qemu_iovec_memset(qiov, task.ret, 0, qiov->size - task.ret);
     }
 
-    r = 0;
+    ret = 0;
 out:
-    return r;
+    return ret;
 }
 
 static int
@@ -524,7 +526,7 @@ coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *qiov,
                                int flags)
 {
-    int r = -EIO;
+    int r, ret = -EIO;
     BDRVRBDState *s = bs->opaque;
     rbd_completion_t c;
     RBDTask task = { .s = s, .co = qemu_coroutine_self() };
@@ -545,20 +547,20 @@ coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
         qemu_coroutine_yield();
     }
 
-    if (task.ret != qiov->size || r < 0) {
+    if (task.ret < 0) {
         goto out;
     }
 
-    r = 0;
+    ret = 0;
 out:
-    return r;
+    return ret;
 }
 
 static int
 coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                       int count, BdrvRequestFlags flags)
 {
-    int r = -EIO;
+    int r, ret = -EIO;
     int zero_flags = 0;
     BDRVRBDState *s = bs->opaque;
     rbd_completion_t c;
@@ -583,19 +585,18 @@ coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
         qemu_coroutine_yield();
     }
 
-    if (task.ret != count || r < 0) {
+    if (task.ret < 0) {
         goto out;
     }
 
-    r = 0;
-
+    ret = 0;
 out: 
-    return r;
+    return ret;
 }
 
 static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
 {
-    int r = -EIO;
+    int r, ret = -EIO;
     BDRVRBDState *s = bs->opaque;
     rbd_completion_t c;
     RBDTask task = { .s = s, .co = qemu_coroutine_self() };
@@ -614,13 +615,18 @@ static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
         qemu_coroutine_yield();
     }
 
+    if (task.ret < 0) {
+        goto out;
+    }
+
+    ret = 0;
 out:
-    return r ? -EIO : 0;
+    return ret;
 }
 
 static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
 {
-    int r = -EIO;
+    int r, ret = -EIO;
     BDRVRBDState *s = bs->opaque;
     rbd_completion_t c;
     RBDTask task = { .s = s, .co = qemu_coroutine_self() };
@@ -639,8 +645,13 @@ static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offse
         qemu_coroutine_yield();
     }
 
+    if (task.ret < 0) {
+        goto out;
+    }
+
+    ret = 0;
 out:
-    return r ? -EIO : 0;
+    return ret;
 }
 
 static char *qemu_rbd_mon_host(BlockdevOptionsRbd *opts, Error **errp)
