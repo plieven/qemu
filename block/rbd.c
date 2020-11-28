@@ -505,10 +505,14 @@ static int rbd_aio_worker(void *arg)
 {
     RBDAIORequest *req = arg;
     BDRVRBDState *s = req->bs->opaque;
-    int ret = -EINVAL;
+    int ret = -EINVAL, op_flags = 0;
     char *buf = NULL, *local_buf = NULL;
     char stackbuf[STACKBUF_MAX];
     int64_t req_time, req_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    if (req->flags & BDRV_REQ_FUA) {
+        op_flags |= LIBRADOS_OP_FLAG_FADVISE_FUA;
+    }
 
     if (req->qiov) {
         if (req->qiov->niov > 1 || req->aio_type == RBD_AIO_WRITE) {
@@ -549,7 +553,7 @@ static int rbd_aio_worker(void *arg)
     case RBD_AIO_WRITE:
         qemu_iovec_to_buf(req->qiov, 0, buf, req->qiov->size);
 
-        ret = rbd_write(s->image, req->offset, req->bytes, buf);
+        ret = rbd_write2(s->image, req->offset, req->bytes, buf, op_flags);
         if (ret != req->bytes) {
             ret = -EIO;
             break;
@@ -558,7 +562,7 @@ static int rbd_aio_worker(void *arg)
         ret = 0;
         break;
     case RBD_AIO_WRITE_ZEROES:
-        ret = rbd_write_zeroes(s->image, req->offset, req->bytes, 0, 0);
+        ret = rbd_write_zeroes(s->image, req->offset, req->bytes, 0, op_flags);
         if (ret != req->bytes) {
             ret = -EIO;
             break;
@@ -918,7 +922,8 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     s->aio_context = bdrv_get_aio_context(bs);
-    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
+    bs->supported_write_flags = BDRV_REQ_FUA;
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP | BDRV_REQ_FUA;
 
     r = 0;
     goto out;
@@ -1209,7 +1214,7 @@ coroutine_fn rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                       int count, BdrvRequestFlags flags)
 {
     if (flags & BDRV_REQ_MAY_UNMAP) {
-        return rbd_submit_co(bs, RBD_AIO_WRITE_ZEROES, offset, count, NULL, 0);
+        return rbd_submit_co(bs, RBD_AIO_WRITE_ZEROES, offset, count, NULL, flags);
     }
     return -ENOTSUP;
 }
