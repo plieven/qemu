@@ -19,6 +19,7 @@
 #include "qemu/option.h"
 #include "block/block_int.h"
 #include "block/qdict.h"
+#include "block/thread-pool.h"
 #include "crypto/secret.h"
 #include "qemu/cutils.h"
 #include "qapi/qmp/qstring.h"
@@ -78,6 +79,15 @@ typedef enum {
     RBD_AIO_FLUSH
 } RBDAIOCmd;
 
+typedef struct RBDAIORequestAIORequest {
+    BlockDriverState *bs;
+    int aio_type;
+    uint64_t offset;
+    uint64_t bytes;
+    QEMUIOVector *qiov;
+    int flags;
+} RBDAIORequest;
+
 typedef struct RBDAIOCB {
     BlockAIOCB common;
     int64_t ret;
@@ -104,6 +114,7 @@ typedef struct BDRVRBDState {
     char *snap;
     char *namespace;
     uint64_t image_size;
+    AioContext *aio_context;
 } BDRVRBDState;
 
 static int qemu_rbd_connect(rados_t *cluster, rados_ioctx_t *io_ctx,
@@ -328,17 +339,6 @@ static int qemu_rbd_set_keypairs(rados_t cluster, const char *keypairs_json,
     return ret;
 }
 
-static void qemu_rbd_memset(RADOSCB *rcb, int64_t offs)
-{
-    if (LIBRBD_USE_IOVEC) {
-        RBDAIOCB *acb = rcb->acb;
-        iov_memset(acb->qiov->iov, acb->qiov->niov, offs, 0,
-                   acb->qiov->size - offs);
-    } else {
-        memset(rcb->buf + offs, 0, rcb->size - offs);
-    }
-}
-
 static QemuOptsList runtime_opts = {
     .name = "rbd",
     .head = QTAILQ_HEAD_INITIALIZER(runtime_opts.head),
@@ -497,51 +497,144 @@ exit:
     return ret;
 }
 
-/*
- * This aio completion is being called from rbd_finish_bh() and runs in qemu
- * BH context.
- */
-static void qemu_rbd_complete_aio(RADOSCB *rcb)
+#define STACKBUF_MAX 4096
+#define SLOW_REQUEST_MS 5000
+
+static int rbd_aio_worker(void *arg)
 {
-    RBDAIOCB *acb = rcb->acb;
-    int64_t r;
+    RBDAIORequest *req = arg;
+    BDRVRBDState *s = req->bs->opaque;
+    int ret = -EINVAL;
+    char *buf = NULL, *local_buf = NULL;
+    char stackbuf[STACKBUF_MAX];
+    int64_t req_time, req_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
-    r = rcb->ret;
-
-    if (acb->cmd != RBD_AIO_READ) {
-        if (r < 0) {
-            acb->ret = r;
-            acb->error = 1;
-        } else if (!acb->error) {
-            acb->ret = rcb->size;
-        }
-    } else {
-        if (r < 0) {
-            qemu_rbd_memset(rcb, 0);
-            acb->ret = r;
-            acb->error = 1;
-        } else if (r < rcb->size) {
-            qemu_rbd_memset(rcb, r);
-            if (!acb->error) {
-                acb->ret = rcb->size;
+    if (req->qiov) {
+        if (req->qiov->niov > 1 || req->aio_type == RBD_AIO_WRITE) {
+            if (req->bytes <= STACKBUF_MAX) {
+                buf = &stackbuf[0];
+            } else {
+                buf = g_try_malloc(req->bytes);
+                if (buf == NULL) {
+                    return -ENOMEM;
+                }
+                local_buf = buf;
             }
-        } else if (!acb->error) {
-            acb->ret = r;
+        } else {
+            buf = req->qiov->iov[0].iov_base;
         }
     }
 
-    g_free(rcb);
+    switch (req->aio_type) {
+    case RBD_AIO_READ:
+        ret = rbd_read(s->image, req->offset, req->bytes, buf);
 
-    if (!LIBRBD_USE_IOVEC) {
-        if (acb->cmd == RBD_AIO_READ) {
-            qemu_iovec_from_buf(acb->qiov, 0, acb->bounce, acb->qiov->size);
+        if (ret > req->bytes || ret < 0) {
+            ret = -EIO;
+            break;
         }
-        qemu_vfree(acb->bounce);
+
+        if (buf != req->qiov->iov[0].iov_base) {
+            qemu_iovec_from_buf(req->qiov, 0, buf, ret);
+        }
+
+        /* zero pad short reads */
+        if (ret < req->qiov->size) {
+            qemu_iovec_memset(req->qiov, ret, 0, req->bytes - ret);
+        }
+
+        ret = 0;
+        break;
+    case RBD_AIO_WRITE:
+        qemu_iovec_to_buf(req->qiov, 0, buf, req->qiov->size);
+
+        ret = rbd_write(s->image, req->offset, req->bytes, buf);
+        if (ret != req->bytes) {
+            ret = -EIO;
+            break;
+        }
+
+        ret = 0;
+        break;
+    case RBD_AIO_FLUSH:
+        ret = rbd_flush(s->image);
+        if (ret) {
+            ret = -EIO;
+        }
+        break;
+    case RBD_AIO_DISCARD:
+        ret = rbd_discard(s->image, req->offset, req->bytes);
+        if (ret) {
+            ret = -EIO;
+        }
+        break;
+    default:
+        error_report("invalid rbd request (0x%x)\n", req->aio_type);
+        break;
     }
 
-    acb->common.cb(acb->common.opaque, (acb->ret > 0 ? 0 : acb->ret));
+    g_free(local_buf);
 
-    qemu_aio_unref(acb);
+    req_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - req_start;
+
+    if (ret) {
+        error_report("rbd_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
+                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
+    } else if (req_time >= SLOW_REQUEST_MS) {
+        error_report("rbd_aio_worker SLOW request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
+                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
+    }
+
+    return ret;
+}
+
+static int coroutine_fn rbd_submit_co(BlockDriverState *bs, int type,
+                                      uint64_t offset, uint64_t bytes, QEMUIOVector *qiov, int flags)
+{
+    RBDAIORequest req = {};
+    BDRVRBDState *s = bs->opaque;
+    ThreadPool *pool;
+
+    req.bs = bs;
+    req.aio_type = type;
+    req.offset = offset;
+    req.bytes = bytes;
+    req.flags = flags;
+
+    if (qiov) {
+        assert(qiov->size == bytes);
+    }
+    req.qiov = qiov;
+
+    pool = aio_get_thread_pool(s->aio_context);
+    return thread_pool_submit_co(pool, rbd_aio_worker, &req);
+}
+
+
+static int
+coroutine_fn rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
+                               uint64_t bytes, QEMUIOVector *iov,
+                               int flags)
+{
+    return rbd_submit_co(bs, RBD_AIO_READ, offset, bytes, iov, flags);
+}
+
+static int
+coroutine_fn rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
+                                uint64_t bytes, QEMUIOVector *iov,
+                                int flags)
+{
+    return rbd_submit_co(bs, RBD_AIO_WRITE, offset, bytes, iov, flags);
+}
+
+static int coroutine_fn rbd_co_flush(BlockDriverState *bs)
+{
+    return rbd_submit_co(bs, RBD_AIO_FLUSH, 0, 0, NULL, 0);
+}
+
+static int coroutine_fn rbd_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+{
+    return rbd_submit_co(bs, RBD_AIO_DISCARD, offset, count, NULL, 0);
 }
 
 static char *qemu_rbd_mon_host(BlockdevOptionsRbd *opts, Error **errp)
@@ -814,6 +907,8 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
+    s->aio_context = bdrv_get_aio_context(bs);
+
     r = 0;
     goto out;
 
@@ -875,202 +970,6 @@ static int qemu_rbd_resize(BlockDriverState *bs, uint64_t size)
 
     return 0;
 }
-
-static const AIOCBInfo rbd_aiocb_info = {
-    .aiocb_size = sizeof(RBDAIOCB),
-};
-
-static void rbd_finish_bh(void *opaque)
-{
-    RADOSCB *rcb = opaque;
-    qemu_rbd_complete_aio(rcb);
-}
-
-/*
- * This is the callback function for rbd_aio_read and _write
- *
- * Note: this function is being called from a non qemu thread so
- * we need to be careful about what we do here. Generally we only
- * schedule a BH, and do the rest of the io completion handling
- * from rbd_finish_bh() which runs in a qemu context.
- */
-static void rbd_finish_aiocb(rbd_completion_t c, RADOSCB *rcb)
-{
-    RBDAIOCB *acb = rcb->acb;
-
-    rcb->ret = rbd_aio_get_return_value(c);
-    rbd_aio_release(c);
-
-    aio_bh_schedule_oneshot(bdrv_get_aio_context(acb->common.bs),
-                            rbd_finish_bh, rcb);
-}
-
-static int rbd_aio_discard_wrapper(rbd_image_t image,
-                                   uint64_t off,
-                                   uint64_t len,
-                                   rbd_completion_t comp)
-{
-#ifdef LIBRBD_SUPPORTS_DISCARD
-    return rbd_aio_discard(image, off, len, comp);
-#else
-    return -ENOTSUP;
-#endif
-}
-
-static int rbd_aio_flush_wrapper(rbd_image_t image,
-                                 rbd_completion_t comp)
-{
-#ifdef LIBRBD_SUPPORTS_AIO_FLUSH
-    return rbd_aio_flush(image, comp);
-#else
-    return -ENOTSUP;
-#endif
-}
-
-static BlockAIOCB *rbd_start_aio(BlockDriverState *bs,
-                                 int64_t off,
-                                 QEMUIOVector *qiov,
-                                 int64_t size,
-                                 BlockCompletionFunc *cb,
-                                 void *opaque,
-                                 RBDAIOCmd cmd)
-{
-    RBDAIOCB *acb;
-    RADOSCB *rcb = NULL;
-    rbd_completion_t c;
-    int r;
-
-    BDRVRBDState *s = bs->opaque;
-
-    acb = qemu_aio_get(&rbd_aiocb_info, bs, cb, opaque);
-    acb->cmd = cmd;
-    acb->qiov = qiov;
-    assert(!qiov || qiov->size == size);
-
-    rcb = g_new(RADOSCB, 1);
-
-    if (!LIBRBD_USE_IOVEC) {
-        if (cmd == RBD_AIO_DISCARD || cmd == RBD_AIO_FLUSH) {
-            acb->bounce = NULL;
-        } else {
-            acb->bounce = qemu_try_blockalign(bs, qiov->size);
-            if (acb->bounce == NULL) {
-                goto failed;
-            }
-        }
-        if (cmd == RBD_AIO_WRITE) {
-            qemu_iovec_to_buf(acb->qiov, 0, acb->bounce, qiov->size);
-        }
-        rcb->buf = acb->bounce;
-    }
-
-    acb->ret = 0;
-    acb->error = 0;
-    acb->s = s;
-
-    rcb->acb = acb;
-    rcb->s = acb->s;
-    rcb->size = size;
-    r = rbd_aio_create_completion(rcb, (rbd_callback_t) rbd_finish_aiocb, &c);
-    if (r < 0) {
-        goto failed;
-    }
-
-    switch (cmd) {
-    case RBD_AIO_WRITE: {
-        /*
-         * RBD APIs don't allow us to write more than actual size, so in order
-         * to support growing images, we resize the image before write
-         * operations that exceed the current size.
-         */
-        if (off + size > s->image_size) {
-            r = qemu_rbd_resize(bs, off + size);
-            if (r < 0) {
-                goto failed_completion;
-            }
-        }
-#ifdef LIBRBD_SUPPORTS_IOVEC
-            r = rbd_aio_writev(s->image, qiov->iov, qiov->niov, off, c);
-#else
-            r = rbd_aio_write(s->image, off, size, rcb->buf, c);
-#endif
-        break;
-    }
-    case RBD_AIO_READ:
-#ifdef LIBRBD_SUPPORTS_IOVEC
-            r = rbd_aio_readv(s->image, qiov->iov, qiov->niov, off, c);
-#else
-            r = rbd_aio_read(s->image, off, size, rcb->buf, c);
-#endif
-        break;
-    case RBD_AIO_DISCARD:
-        r = rbd_aio_discard_wrapper(s->image, off, size, c);
-        break;
-    case RBD_AIO_FLUSH:
-        r = rbd_aio_flush_wrapper(s->image, c);
-        break;
-    default:
-        r = -EINVAL;
-    }
-
-    if (r < 0) {
-        goto failed_completion;
-    }
-    return &acb->common;
-
-failed_completion:
-    rbd_aio_release(c);
-failed:
-    g_free(rcb);
-    if (!LIBRBD_USE_IOVEC) {
-        qemu_vfree(acb->bounce);
-    }
-
-    qemu_aio_unref(acb);
-    return NULL;
-}
-
-static BlockAIOCB *qemu_rbd_aio_preadv(BlockDriverState *bs,
-                                       uint64_t offset, uint64_t bytes,
-                                       QEMUIOVector *qiov, int flags,
-                                       BlockCompletionFunc *cb,
-                                       void *opaque)
-{
-    return rbd_start_aio(bs, offset, qiov, bytes, cb, opaque,
-                         RBD_AIO_READ);
-}
-
-static BlockAIOCB *qemu_rbd_aio_pwritev(BlockDriverState *bs,
-                                        uint64_t offset, uint64_t bytes,
-                                        QEMUIOVector *qiov, int flags,
-                                        BlockCompletionFunc *cb,
-                                        void *opaque)
-{
-    return rbd_start_aio(bs, offset, qiov, bytes, cb, opaque,
-                         RBD_AIO_WRITE);
-}
-
-#ifdef LIBRBD_SUPPORTS_AIO_FLUSH
-static BlockAIOCB *qemu_rbd_aio_flush(BlockDriverState *bs,
-                                      BlockCompletionFunc *cb,
-                                      void *opaque)
-{
-    return rbd_start_aio(bs, 0, NULL, 0, cb, opaque, RBD_AIO_FLUSH);
-}
-
-#else
-
-static int qemu_rbd_co_flush(BlockDriverState *bs)
-{
-#if LIBRBD_VERSION_CODE >= LIBRBD_VERSION(0, 1, 1)
-    /* rbd_flush added in 0.1.1 */
-    BDRVRBDState *s = bs->opaque;
-    return rbd_flush(s->image);
-#else
-    return 0;
-#endif
-}
-#endif
 
 static int qemu_rbd_getinfo(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
@@ -1235,18 +1134,6 @@ static int qemu_rbd_snap_list(BlockDriverState *bs,
     return snap_count;
 }
 
-#ifdef LIBRBD_SUPPORTS_DISCARD
-static BlockAIOCB *qemu_rbd_aio_pdiscard(BlockDriverState *bs,
-                                         int64_t offset,
-                                         int bytes,
-                                         BlockCompletionFunc *cb,
-                                         void *opaque)
-{
-    return rbd_start_aio(bs, offset, NULL, bytes, cb, opaque,
-                         RBD_AIO_DISCARD);
-}
-#endif
-
 #ifdef LIBRBD_SUPPORTS_INVALIDATE
 static void coroutine_fn qemu_rbd_co_invalidate_cache(BlockDriverState *bs,
                                                       Error **errp)
@@ -1294,6 +1181,18 @@ static const char *const qemu_rbd_strong_runtime_opts[] = {
     NULL
 };
 
+static void rbd_attach_aio_context(BlockDriverState *bs,
+                                       AioContext *new_context)
+{
+    BDRVRBDState *s = bs->opaque;
+    s->aio_context = new_context;
+}
+
+static void rbd_detach_aio_context(BlockDriverState *bs)
+{
+
+}
+
 static BlockDriver bdrv_rbd = {
     .format_name            = "rbd",
     .instance_size          = sizeof(BDRVRBDState),
@@ -1311,18 +1210,11 @@ static BlockDriver bdrv_rbd = {
     .bdrv_co_truncate       = qemu_rbd_co_truncate,
     .protocol_name          = "rbd",
 
-    .bdrv_aio_preadv        = qemu_rbd_aio_preadv,
-    .bdrv_aio_pwritev       = qemu_rbd_aio_pwritev,
-
-#ifdef LIBRBD_SUPPORTS_AIO_FLUSH
-    .bdrv_aio_flush         = qemu_rbd_aio_flush,
-#else
-    .bdrv_co_flush_to_disk  = qemu_rbd_co_flush,
-#endif
-
-#ifdef LIBRBD_SUPPORTS_DISCARD
-    .bdrv_aio_pdiscard      = qemu_rbd_aio_pdiscard,
-#endif
+    .bdrv_co_preadv                 = rbd_co_preadv,
+    .bdrv_co_pwritev                = rbd_co_pwritev,
+    .bdrv_co_flush_to_disk          = rbd_co_flush,
+    .bdrv_co_pdiscard               = rbd_co_pdiscard,
+    //~ .bdrv_co_pwrite_zeroes          = quobyte_co_pwrite_zeroes,
 
     .bdrv_snapshot_create   = qemu_rbd_snap_create,
     .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
@@ -1331,6 +1223,9 @@ static BlockDriver bdrv_rbd = {
 #ifdef LIBRBD_SUPPORTS_INVALIDATE
     .bdrv_co_invalidate_cache = qemu_rbd_co_invalidate_cache,
 #endif
+
+    .bdrv_attach_aio_context        = rbd_attach_aio_context,
+    .bdrv_detach_aio_context        = rbd_detach_aio_context,
 
     .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
 };
