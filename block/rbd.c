@@ -65,48 +65,6 @@
 
 #define RBD_MAX_SNAPS 100
 
-/* The LIBRBD_SUPPORTS_IOVEC is defined in librbd.h */
-#ifdef LIBRBD_SUPPORTS_IOVEC
-#define LIBRBD_USE_IOVEC 1
-#else
-#define LIBRBD_USE_IOVEC 0
-#endif
-
-typedef enum {
-    RBD_AIO_READ,
-    RBD_AIO_WRITE,
-    RBD_AIO_DISCARD,
-    RBD_AIO_FLUSH,
-    RBD_AIO_WRITE_ZEROES
-} RBDAIOCmd;
-
-typedef struct RBDAIORequestAIORequest {
-    BlockDriverState *bs;
-    int aio_type;
-    uint64_t offset;
-    uint64_t bytes;
-    QEMUIOVector *qiov;
-    int flags;
-} RBDAIORequest;
-
-typedef struct RBDAIOCB {
-    BlockAIOCB common;
-    int64_t ret;
-    QEMUIOVector *qiov;
-    char *bounce;
-    RBDAIOCmd cmd;
-    int error;
-    struct BDRVRBDState *s;
-} RBDAIOCB;
-
-typedef struct RADOSCB {
-    RBDAIOCB *acb;
-    struct BDRVRBDState *s;
-    int64_t size;
-    char *buf;
-    int64_t ret;
-} RADOSCB;
-
 typedef struct BDRVRBDState {
     rados_t cluster;
     rados_ioctx_t io_ctx;
@@ -118,6 +76,13 @@ typedef struct BDRVRBDState {
     uint64_t object_size;
     AioContext *aio_context;
 } BDRVRBDState;
+
+typedef struct RBDTask {
+    BDRVRBDState *s;
+    Coroutine *co;
+    bool complete;
+    int64_t ret;
+} RBDTask;
 
 static int qemu_rbd_connect(rados_t *cluster, rados_ioctx_t *io_ctx,
                             BlockdevOptionsRbd *opts, bool cache,
@@ -501,157 +466,181 @@ exit:
     return ret;
 }
 
-#define STACKBUF_MAX 4096
-#define SLOW_REQUEST_MS 5000
-
-static int rbd_aio_worker(void *arg)
+static void qemu_rbd_finish_bh(void *opaque)
 {
-    RBDAIORequest *req = arg;
-    BDRVRBDState *s = req->bs->opaque;
-    int ret = -EINVAL, op_flags = 0;
-    char *buf = NULL, *local_buf = NULL;
-    char stackbuf[STACKBUF_MAX];
-    int64_t req_time, req_start = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-
-    if (req->flags & BDRV_REQ_FUA) {
-        op_flags |= LIBRADOS_OP_FLAG_FADVISE_FUA;
-    }
-
-    if (req->qiov) {
-        if (req->qiov->niov > 1 || req->aio_type == RBD_AIO_WRITE) {
-            if (req->bytes <= STACKBUF_MAX) {
-                buf = &stackbuf[0];
-            } else {
-                buf = g_try_malloc(req->bytes);
-                if (buf == NULL) {
-                    return -ENOMEM;
-                }
-                local_buf = buf;
-            }
-        } else {
-            buf = req->qiov->iov[0].iov_base;
-        }
-    }
-
-    switch (req->aio_type) {
-    case RBD_AIO_READ:
-        ret = rbd_read(s->image, req->offset, req->bytes, buf);
-
-        if (ret > req->bytes || ret < 0) {
-            ret = -EIO;
-            break;
-        }
-
-        if (buf != req->qiov->iov[0].iov_base) {
-            qemu_iovec_from_buf(req->qiov, 0, buf, ret);
-        }
-
-        /* zero pad short reads */
-        if (ret < req->qiov->size) {
-            qemu_iovec_memset(req->qiov, ret, 0, req->bytes - ret);
-        }
-
-        ret = 0;
-        break;
-    case RBD_AIO_WRITE:
-        qemu_iovec_to_buf(req->qiov, 0, buf, req->qiov->size);
-
-        ret = rbd_write2(s->image, req->offset, req->bytes, buf, op_flags);
-        if (ret != req->bytes) {
-            ret = -EIO;
-            break;
-        }
-
-        ret = 0;
-        break;
-    case RBD_AIO_WRITE_ZEROES:
-        ret = rbd_write_zeroes(s->image, req->offset, req->bytes, 0, op_flags);
-        if (ret != req->bytes) {
-            ret = -EIO;
-            break;
-        }
-
-        ret = 0;
-        break;
-    case RBD_AIO_FLUSH:
-        ret = rbd_flush(s->image);
-        if (ret) {
-            ret = -EIO;
-        }
-        break;
-    case RBD_AIO_DISCARD:
-        ret = rbd_discard(s->image, req->offset, req->bytes);
-        if (ret) {
-            ret = -EIO;
-        }
-        break;
-    default:
-        error_report("invalid rbd request (0x%x)\n", req->aio_type);
-        break;
-    }
-
-    g_free(local_buf);
-
-    req_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - req_start;
-
-    if (ret) {
-        error_report("rbd_aio_worker failed request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
-                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
-    } else if (req_time >= SLOW_REQUEST_MS) {
-        error_report("rbd_aio_worker SLOW request: req %p type %d offset %"PRIu64" bytes %"PRIu64" flags %d ret %d errno %d time %"PRIi64"ms",
-                     req, req->aio_type, req->offset, req->bytes, req->flags, ret, errno, req_time);
-    }
-
-    return ret;
+    RBDTask *task = opaque;
+    task->complete = 1;
+    aio_co_wake(task->co);
 }
 
-static int coroutine_fn rbd_submit_co(BlockDriverState *bs, int type,
-                                      uint64_t offset, uint64_t bytes, QEMUIOVector *qiov, int flags)
+static void qemu_rbd_finish_aiocb(rbd_completion_t c, RBDTask *task)
 {
-    RBDAIORequest req = {};
-    BDRVRBDState *s = bs->opaque;
-    ThreadPool *pool;
+    task->ret = rbd_aio_get_return_value(c);
+    rbd_aio_release(c);
 
-    req.bs = bs;
-    req.aio_type = type;
-    req.offset = offset;
-    req.bytes = bytes;
-    req.flags = flags;
-
-    if (qiov) {
-        assert(qiov->size == bytes);
-    }
-    req.qiov = qiov;
-
-    pool = aio_get_thread_pool(s->aio_context);
-    return thread_pool_submit_co(pool, rbd_aio_worker, &req);
+    aio_bh_schedule_oneshot(task->s->aio_context, qemu_rbd_finish_bh, task);
 }
-
 
 static int
-coroutine_fn rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
-                               uint64_t bytes, QEMUIOVector *iov,
+coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
+                               uint64_t bytes, QEMUIOVector *qiov,
                                int flags)
 {
-    return rbd_submit_co(bs, RBD_AIO_READ, offset, bytes, iov, flags);
+    int r = -EIO;
+    BDRVRBDState *s = bs->opaque;
+    rbd_completion_t c;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+
+    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    if (r < 0) {
+        goto out;
+    }
+
+    r = rbd_aio_readv(s->image, qiov->iov, qiov->niov, offset, c);
+    if (r < 0) {
+        goto out;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+    if (task.ret > qiov->size || r < 0) {
+        goto out;
+    }
+
+    /* zero pad short reads */
+    if (task.ret < qiov->size) {
+        qemu_iovec_memset(qiov, task.ret, 0, qiov->size - task.ret);
+    }
+
+    r = 0;
+out:
+    return r;
 }
 
 static int
-coroutine_fn rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
-                                uint64_t bytes, QEMUIOVector *iov,
-                                int flags)
+coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
+                               uint64_t bytes, QEMUIOVector *qiov,
+                               int flags)
 {
-    return rbd_submit_co(bs, RBD_AIO_WRITE, offset, bytes, iov, flags);
+    int r = -EIO;
+    BDRVRBDState *s = bs->opaque;
+    rbd_completion_t c;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+
+    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    if (r < 0) {
+        goto out;
+    }
+
+    //TODO: support image growth?
+
+    r = rbd_aio_writev(s->image, qiov->iov, qiov->niov, offset, c);
+    if (r < 0) {
+        goto out;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+    if (task.ret != qiov->size || r < 0) {
+        goto out;
+    }
+
+    r = 0;
+out:
+    return r;
 }
 
-static int coroutine_fn rbd_co_flush(BlockDriverState *bs)
+static int
+coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
+                                      int count, BdrvRequestFlags flags)
 {
-    return rbd_submit_co(bs, RBD_AIO_FLUSH, 0, 0, NULL, 0);
+    int r = -EIO;
+    int zero_flags = 0;
+    BDRVRBDState *s = bs->opaque;
+    rbd_completion_t c;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+
+    if (!(flags & BDRV_REQ_MAY_UNMAP)) {
+        r = -ENOTSUP;
+        goto out;
+    }
+
+    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    if (r < 0) {
+        goto out;
+    }
+
+    r = rbd_aio_write_zeroes(s->image, offset, count, c, zero_flags, 0);
+    if (r < 0) {
+        goto out;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+    if (task.ret != count || r < 0) {
+        goto out;
+    }
+
+    r = 0;
+
+out: 
+    return r;
 }
 
-static int coroutine_fn rbd_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
 {
-    return rbd_submit_co(bs, RBD_AIO_DISCARD, offset, count, NULL, 0);
+    int r = -EIO;
+    BDRVRBDState *s = bs->opaque;
+    rbd_completion_t c;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+
+    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    if (r < 0) {
+        goto out;
+    }
+
+    r = rbd_aio_flush(s->image, c);
+    if (r < 0) {
+        goto out;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+out:
+    return r ? -EIO : 0;
+}
+
+static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+{
+    int r = -EIO;
+    BDRVRBDState *s = bs->opaque;
+    rbd_completion_t c;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+
+    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    if (r < 0) {
+        goto out;
+    }
+
+    r = rbd_aio_discard(s->image, offset, count, c);
+    if (r < 0) {
+        goto out;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+out:
+    return r ? -EIO : 0;
 }
 
 static char *qemu_rbd_mon_host(BlockdevOptionsRbd *opts, Error **errp)
@@ -928,8 +917,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     s->aio_context = bdrv_get_aio_context(bs);
-    bs->supported_write_flags = BDRV_REQ_FUA;
-    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP | BDRV_REQ_FUA;
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
 
     r = 0;
     goto out;
@@ -1187,26 +1175,16 @@ static const char *const qemu_rbd_strong_runtime_opts[] = {
     NULL
 };
 
-static void rbd_attach_aio_context(BlockDriverState *bs,
+static void qemu_rbd_attach_aio_context(BlockDriverState *bs,
                                        AioContext *new_context)
 {
     BDRVRBDState *s = bs->opaque;
     s->aio_context = new_context;
 }
 
-static void rbd_detach_aio_context(BlockDriverState *bs)
+static void qemu_rbd_detach_aio_context(BlockDriverState *bs)
 {
 
-}
-
-static int
-coroutine_fn rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
-                                      int count, BdrvRequestFlags flags)
-{
-    if (flags & BDRV_REQ_MAY_UNMAP) {
-        return rbd_submit_co(bs, RBD_AIO_WRITE_ZEROES, offset, count, NULL, flags);
-    }
-    return -ENOTSUP;
 }
 
 
@@ -1227,11 +1205,11 @@ static BlockDriver bdrv_rbd = {
     .bdrv_co_truncate       = qemu_rbd_co_truncate,
     .protocol_name          = "rbd",
 
-    .bdrv_co_preadv                 = rbd_co_preadv,
-    .bdrv_co_pwritev                = rbd_co_pwritev,
-    .bdrv_co_flush_to_disk          = rbd_co_flush,
-    .bdrv_co_pdiscard               = rbd_co_pdiscard,
-    .bdrv_co_pwrite_zeroes          = rbd_co_pwrite_zeroes,
+    .bdrv_co_preadv                 = qemu_rbd_co_preadv,
+    .bdrv_co_pwritev                = qemu_rbd_co_pwritev,
+    .bdrv_co_flush_to_disk          = qemu_rbd_co_flush,
+    .bdrv_co_pdiscard               = qemu_rbd_co_pdiscard,
+    .bdrv_co_pwrite_zeroes          = qemu_rbd_co_pwrite_zeroes,
 
     .bdrv_snapshot_create   = qemu_rbd_snap_create,
     .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
@@ -1241,8 +1219,8 @@ static BlockDriver bdrv_rbd = {
     .bdrv_co_invalidate_cache = qemu_rbd_co_invalidate_cache,
 #endif
 
-    .bdrv_attach_aio_context        = rbd_attach_aio_context,
-    .bdrv_detach_aio_context        = rbd_detach_aio_context,
+    .bdrv_attach_aio_context        = qemu_rbd_attach_aio_context,
+    .bdrv_detach_aio_context        = qemu_rbd_detach_aio_context,
 
     .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
 };
