@@ -115,6 +115,7 @@ typedef struct BDRVRBDState {
     char *snap;
     char *namespace;
     uint64_t image_size;
+    uint64_t object_size;
     AioContext *aio_context;
 } BDRVRBDState;
 
@@ -254,8 +255,10 @@ done:
 
 static void qemu_rbd_refresh_limits(BlockDriverState *bs, Error **errp)
 {
+    BDRVRBDState *s = bs->opaque;
     /* XXX Does RBD support AIO on less than 512-byte alignment? */
     bs->bl.request_alignment = 512;
+    bs->bl.pwrite_zeroes_alignment = s->object_size;
 }
 
 
@@ -839,6 +842,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     const QDictEntry *e;
     Error *local_err = NULL;
     char *keypairs, *secretid;
+    rbd_image_info_t info;
     int r;
 
     keypairs = g_strdup(qdict_get_try_str(options, "=keyvalue-pairs"));
@@ -903,13 +907,15 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
         goto failed_open;
     }
 
-    r = rbd_get_size(s->image, &s->image_size);
+    r = rbd_stat(s->image, &info, sizeof(info));
     if (r < 0) {
-        error_setg_errno(errp, -r, "error getting image size from %s",
+        error_setg_errno(errp, -r, "error getting image info from %s",
                          s->image_name);
         rbd_close(s->image);
         goto failed_open;
     }
+    s->image_size = info.size;
+    s->object_size = info.obj_size;
 
     /* If we are using an rbd snapshot, we must be r/o, otherwise
      * leave as-is */
@@ -990,30 +996,14 @@ static int qemu_rbd_resize(BlockDriverState *bs, uint64_t size)
 static int qemu_rbd_getinfo(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     BDRVRBDState *s = bs->opaque;
-    rbd_image_info_t info;
-    int r;
-
-    r = rbd_stat(s->image, &info, sizeof(info));
-    if (r < 0) {
-        return r;
-    }
-
-    bdi->cluster_size = info.obj_size;
+    bdi->cluster_size = s->object_size;
     return 0;
 }
 
 static int64_t qemu_rbd_getlength(BlockDriverState *bs)
 {
     BDRVRBDState *s = bs->opaque;
-    rbd_image_info_t info;
-    int r;
-
-    r = rbd_stat(s->image, &info, sizeof(info));
-    if (r < 0) {
-        return r;
-    }
-
-    return info.size;
+    return s->image_size;
 }
 
 static int coroutine_fn qemu_rbd_co_truncate(BlockDriverState *bs,
@@ -1218,6 +1208,7 @@ coroutine_fn rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
     }
     return -ENOTSUP;
 }
+
 
 static BlockDriver bdrv_rbd = {
     .format_name            = "rbd",
