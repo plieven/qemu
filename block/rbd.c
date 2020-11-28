@@ -76,7 +76,8 @@ typedef enum {
     RBD_AIO_READ,
     RBD_AIO_WRITE,
     RBD_AIO_DISCARD,
-    RBD_AIO_FLUSH
+    RBD_AIO_FLUSH,
+    RBD_AIO_WRITE_ZEROES
 } RBDAIOCmd;
 
 typedef struct RBDAIORequestAIORequest {
@@ -556,6 +557,15 @@ static int rbd_aio_worker(void *arg)
 
         ret = 0;
         break;
+    case RBD_AIO_WRITE_ZEROES:
+        ret = rbd_write_zeroes(s->image, req->offset, req->bytes, 0, 0);
+        if (ret != req->bytes) {
+            ret = -EIO;
+            break;
+        }
+
+        ret = 0;
+        break;
     case RBD_AIO_FLUSH:
         ret = rbd_flush(s->image);
         if (ret) {
@@ -908,6 +918,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     s->aio_context = bdrv_get_aio_context(bs);
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
 
     r = 0;
     goto out;
@@ -1193,6 +1204,16 @@ static void rbd_detach_aio_context(BlockDriverState *bs)
 
 }
 
+static int
+coroutine_fn rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
+                                      int count, BdrvRequestFlags flags)
+{
+    if (flags & BDRV_REQ_MAY_UNMAP) {
+        return rbd_submit_co(bs, RBD_AIO_WRITE_ZEROES, offset, count, NULL, 0);
+    }
+    return -ENOTSUP;
+}
+
 static BlockDriver bdrv_rbd = {
     .format_name            = "rbd",
     .instance_size          = sizeof(BDRVRBDState),
@@ -1214,7 +1235,7 @@ static BlockDriver bdrv_rbd = {
     .bdrv_co_pwritev                = rbd_co_pwritev,
     .bdrv_co_flush_to_disk          = rbd_co_flush,
     .bdrv_co_pdiscard               = rbd_co_pdiscard,
-    //~ .bdrv_co_pwrite_zeroes          = quobyte_co_pwrite_zeroes,
+    .bdrv_co_pwrite_zeroes          = rbd_co_pwrite_zeroes,
 
     .bdrv_snapshot_create   = qemu_rbd_snap_create,
     .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
