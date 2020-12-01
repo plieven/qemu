@@ -483,6 +483,9 @@ static void qemu_rbd_finish_aiocb(rbd_completion_t c, RBDTask *task)
     aio_bh_schedule_oneshot(task->s->aio_context, qemu_rbd_finish_bh, task);
 }
 
+//TODO: use one wrapper for all
+//TODO: rbd_aio_release(c) in case of failure after creation
+
 static int
 coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *qiov,
@@ -518,6 +521,10 @@ coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
 
     ret = 0;
 out:
+    if (ret) {
+        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld\n", __FUNCTION__, offset, bytes, task.ret);
+    }
+
     return ret;
 }
 
@@ -553,6 +560,9 @@ coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
 
     ret = 0;
 out:
+    if (ret) {
+        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld\n", __FUNCTION__, offset, bytes, task.ret);
+    }
     return ret;
 }
 
@@ -590,7 +600,10 @@ coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
     }
 
     ret = 0;
-out: 
+out:
+    if (ret) {
+        error_report("RBD FAIL %s offset %ld count %d task.ret %ld\n", __FUNCTION__, offset, count, task.ret);
+    }
     return ret;
 }
 
@@ -621,6 +634,10 @@ static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
 
     ret = 0;
 out:
+    if (ret) {
+        error_report("RBD FAIL %s task.ret %ld\n", __FUNCTION__, task.ret);
+    }
+
     return ret;
 }
 
@@ -651,6 +668,9 @@ static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offse
 
     ret = 0;
 out:
+    if (ret) {
+        error_report("RBD FAIL %s offset %ld count %d task.ret %ld\n", __FUNCTION__, offset, count, task.ret);
+    }
     return ret;
 }
 
