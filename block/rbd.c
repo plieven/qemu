@@ -577,8 +577,7 @@ coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
     RBDTask task = { .s = s, .co = qemu_coroutine_self() };
 
     if (!(flags & BDRV_REQ_MAY_UNMAP)) {
-        r = -ENOTSUP;
-        goto out;
+        return -ENOTSUP;
     }
 
     r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
