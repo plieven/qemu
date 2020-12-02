@@ -522,7 +522,7 @@ coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
     ret = 0;
 out:
     if (ret) {
-        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld\n", __FUNCTION__, offset, bytes, task.ret);
+        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld r %d\n", __FUNCTION__, offset, bytes, task.ret, r);
     }
 
     return ret;
@@ -561,7 +561,7 @@ coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
     ret = 0;
 out:
     if (ret) {
-        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld\n", __FUNCTION__, offset, bytes, task.ret);
+        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld r %d\n", __FUNCTION__, offset, bytes, task.ret, r);
     }
     return ret;
 }
@@ -602,7 +602,7 @@ coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
     ret = 0;
 out:
     if (ret) {
-        error_report("RBD FAIL %s offset %ld count %d task.ret %ld\n", __FUNCTION__, offset, count, task.ret);
+        error_report("RBD FAIL %s offset %ld count %d task.ret %ld r %d\n", __FUNCTION__, offset, count, task.ret, r);
     }
     return ret;
 }
@@ -635,7 +635,7 @@ static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
     ret = 0;
 out:
     if (ret) {
-        error_report("RBD FAIL %s task.ret %ld\n", __FUNCTION__, task.ret);
+        error_report("RBD FAIL %s task.ret %ld r %d\n", __FUNCTION__, task.ret, r);
     }
 
     return ret;
@@ -669,7 +669,7 @@ static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offse
     ret = 0;
 out:
     if (ret) {
-        error_report("RBD FAIL %s offset %ld count %d task.ret %ld\n", __FUNCTION__, offset, count, task.ret);
+        error_report("RBD FAIL %s offset %ld count %d task.ret %ld r %d\n", __FUNCTION__, offset, count, task.ret, r);
     }
     return ret;
 }
