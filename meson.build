@@ -682,11 +682,14 @@ endif
 
 rbd = not_found
 if not get_option('rbd').auto() or have_block
-  librados = cc.find_library('rados', required: get_option('rbd'),
-                             static: enable_static)
+  librados = cc.find_library('rados', has_headers: ['rados/librados.h'],
+                             required: get_option('rbd'),
+                             static: enable_static,
+                             dirs: ['/usr/lib'])
   librbd = cc.find_library('rbd', has_headers: ['rbd/librbd.h'],
                            required: get_option('rbd'),
-                           static: enable_static)
+                           static: enable_static,
+                           dirs: ['/usr/lib'])
   if librados.found() and librbd.found() and cc.links('''
     #include <stdio.h>
     #include <rbd/librbd.h>
@@ -696,6 +699,10 @@ if not get_option('rbd').auto() or have_block
       return 0;
     }''', dependencies: [librbd, librados])
     rbd = declare_dependency(dependencies: [librbd, librados])
+  else
+    if get_option('rbd').enabled()
+      error('librados and librbd devel required')
+    endif
   endif
 endif
 
