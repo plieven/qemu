@@ -694,14 +694,15 @@ if not get_option('rbd').auto() or have_block
     #include <stdio.h>
     #include <rbd/librbd.h>
     int main(void) {
-      rados_t cluster;
-      rados_create(&cluster, NULL);
+      #if LIBRBD_VERSION_CODE < LIBRBD_VERSION(1, 12, 0)
+      #error
+      #endif
       return 0;
     }''', dependencies: [librbd, librados])
     rbd = declare_dependency(dependencies: [librbd, librados])
   else
     if get_option('rbd').enabled()
-      error('librados and librbd devel required')
+      error('librados and librbd devel (>= 12.0.0) required')
     endif
   endif
 endif
