@@ -65,6 +65,14 @@
 
 #define RBD_MAX_SNAPS 100
 
+typedef enum {
+    RBD_AIO_READ,
+    RBD_AIO_WRITE,
+    RBD_AIO_DISCARD,
+    RBD_AIO_FLUSH,
+    RBD_AIO_WRITE_ZEROES
+} RBDAIOCmd;
+
 typedef struct BDRVRBDState {
     rados_t cluster;
     rados_ioctx_t io_ctx;
@@ -466,6 +474,22 @@ exit:
     return ret;
 }
 
+/* Resize the RBD image and update the 'image_size' with the current size */
+static int qemu_rbd_resize(BlockDriverState *bs, uint64_t size)
+{
+    BDRVRBDState *s = bs->opaque;
+    int r;
+
+    r = rbd_resize(s->image, size);
+    if (r < 0) {
+        return r;
+    }
+
+    s->image_size = size;
+
+    return 0;
+}
+
 static void qemu_rbd_finish_bh(void *opaque)
 {
     RBDTask *task = opaque;
@@ -473,204 +497,156 @@ static void qemu_rbd_finish_bh(void *opaque)
     aio_co_wake(task->co);
 }
 
-static void qemu_rbd_finish_aiocb(rbd_completion_t c, RBDTask *task)
+static void qemu_rbd_completion_cb(rbd_completion_t c, RBDTask *task)
 {
     task->ret = rbd_aio_get_return_value(c);
     rbd_aio_release(c);
-
-    //TODO: log errors and slow requests
-
     aio_bh_schedule_oneshot(task->s->aio_context, qemu_rbd_finish_bh, task);
 }
 
-//TODO: use one wrapper for all
-//TODO: rbd_aio_release(c) in case of failure after creation
+static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
+                                          uint64_t offset,
+                                          uint64_t bytes,
+                                          QEMUIOVector *qiov,
+                                          int flags,
+                                          RBDAIOCmd cmd)
+{
+    BDRVRBDState *s = bs->opaque;
+    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+    rbd_completion_t c;
+    int r;
+
+    assert(!qiov || qiov->size == bytes);
+
+    r = rbd_aio_create_completion(&task,
+                                  (rbd_callback_t) qemu_rbd_completion_cb, &c);
+    if (r < 0) {
+        return r;
+    }
+
+    switch (cmd) {
+    case RBD_AIO_READ:
+        r = rbd_aio_readv(s->image, qiov->iov, qiov->niov, offset, c);
+        break;
+    case RBD_AIO_WRITE:
+        r = rbd_aio_writev(s->image, qiov->iov, qiov->niov, offset, c);
+        break;
+    case RBD_AIO_DISCARD:
+        r = rbd_aio_discard(s->image, offset, bytes, c);
+        break;
+    case RBD_AIO_FLUSH:
+        r = rbd_aio_flush(s->image, c);
+        break;
+#ifdef LIBRBD_SUPPORTS_WRITE_ZEROES
+    case RBD_AIO_WRITE_ZEROES: {
+        int zero_flags = 0;
+#ifdef RBD_WRITE_ZEROES_FLAG_THICK_PROVISION
+        if (!(flags & BDRV_REQ_MAY_UNMAP)) {
+            zero_flags = RBD_WRITE_ZEROES_FLAG_THICK_PROVISION;
+        }
+#endif
+        r = rbd_aio_write_zeroes(s->image, offset, bytes, c, zero_flags, 0);
+        break;
+    }
+#endif
+    default:
+        r = -EINVAL;
+    }
+
+    if (r < 0) {
+        error_report("rbd request failed early: cmd %d offset %" PRIu64
+                     " bytes %" PRIu64 " flags %d r %d (%s)", cmd, offset,
+                     bytes, flags, r, strerror(-r));
+        rbd_aio_release(c);
+        return r;
+    }
+
+    while (!task.complete) {
+        qemu_coroutine_yield();
+    }
+
+    if (task.ret < 0) {
+        error_report("rbd request failed: cmd %d offset %" PRIu64 " bytes %"
+                     PRIu64 " flags %d task.ret %" PRIi64 " (%s)", cmd, offset,
+                     bytes, flags, task.ret, strerror(-task.ret));
+        return task.ret;
+    }
+
+    /* zero pad short reads */
+    if (cmd == RBD_AIO_READ && task.ret < qiov->size) {
+        qemu_iovec_memset(qiov, task.ret, 0, qiov->size - task.ret);
+    }
+
+    return 0;
+}
 
 static int
 coroutine_fn qemu_rbd_co_preadv(BlockDriverState *bs, uint64_t offset,
                                uint64_t bytes, QEMUIOVector *qiov,
                                int flags)
 {
-    int r, ret = -EIO;
-    BDRVRBDState *s = bs->opaque;
-    rbd_completion_t c;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
-
-    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
-    if (r < 0) {
-        goto out;
-    }
-
-    r = rbd_aio_readv(s->image, qiov->iov, qiov->niov, offset, c);
-    if (r < 0) {
-        goto out;
-    }
-
-    while (!task.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (task.ret > qiov->size || task.ret < 0) {
-        goto out;
-    }
-
-    /* zero pad short reads */
-    if (task.ret < qiov->size) {
-        qemu_iovec_memset(qiov, task.ret, 0, qiov->size - task.ret);
-    }
-
-    ret = 0;
-out:
-    if (ret) {
-        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld r %d\n", __FUNCTION__, offset, bytes, task.ret, r);
-    }
-
-    return ret;
+    return qemu_rbd_start_co(bs, offset, bytes, qiov, flags, RBD_AIO_READ);
 }
 
 static int
 coroutine_fn qemu_rbd_co_pwritev(BlockDriverState *bs, uint64_t offset,
-                               uint64_t bytes, QEMUIOVector *qiov,
-                               int flags)
+                                 uint64_t bytes, QEMUIOVector *qiov,
+                                 int flags)
 {
-    int r, ret = -EIO;
     BDRVRBDState *s = bs->opaque;
-    rbd_completion_t c;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
-
-    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
-    if (r < 0) {
-        goto out;
+    /*
+     * RBD APIs don't allow us to write more than actual size, so in order
+     * to support growing images, we resize the image before write
+     * operations that exceed the current size.
+     */
+    if (offset + bytes > s->image_size) {
+        int r = qemu_rbd_resize(bs, offset + bytes);
+        if (r < 0) {
+            return r;
+        }
     }
-
-    //TODO: support image growth?
-
-    r = rbd_aio_writev(s->image, qiov->iov, qiov->niov, offset, c);
-    if (r < 0) {
-        goto out;
-    }
-
-    while (!task.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (task.ret < 0) {
-        goto out;
-    }
-
-    ret = 0;
-out:
-    if (ret) {
-        error_report("RBD FAIL %s offset %lu count %lu task.ret %ld r %d\n", __FUNCTION__, offset, bytes, task.ret, r);
-    }
-    return ret;
-}
-
-static int
-coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
-                                      int count, BdrvRequestFlags flags)
-{
-    int r, ret = -EIO;
-    int zero_flags = 0;
-    BDRVRBDState *s = bs->opaque;
-    rbd_completion_t c;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
-
-    if (!(flags & BDRV_REQ_MAY_UNMAP)) {
-        return -ENOTSUP;
-    }
-
-    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
-    if (r < 0) {
-        goto out;
-    }
-
-    r = rbd_aio_write_zeroes(s->image, offset, count, c, zero_flags, 0);
-    if (r < 0) {
-        goto out;
-    }
-
-    while (!task.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (task.ret < 0) {
-        goto out;
-    }
-
-    ret = 0;
-out:
-    if (ret) {
-        error_report("RBD FAIL %s offset %ld count %d task.ret %ld r %d\n", __FUNCTION__, offset, count, task.ret, r);
-    }
-    return ret;
+    return qemu_rbd_start_co(bs, offset, bytes, qiov, flags, RBD_AIO_WRITE);
 }
 
 static int coroutine_fn qemu_rbd_co_flush(BlockDriverState *bs)
 {
-    int r, ret = -EIO;
-    BDRVRBDState *s = bs->opaque;
-    rbd_completion_t c;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
-
-    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
-    if (r < 0) {
-        goto out;
-    }
-
-    r = rbd_aio_flush(s->image, c);
-    if (r < 0) {
-        goto out;
-    }
-
-    while (!task.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (task.ret < 0) {
-        goto out;
-    }
-
-    ret = 0;
-out:
-    if (ret) {
-        error_report("RBD FAIL %s task.ret %ld r %d\n", __FUNCTION__, task.ret, r);
-    }
-
-    return ret;
+    return qemu_rbd_start_co(bs, 0, 0, NULL, 0, RBD_AIO_FLUSH);
 }
 
-static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs, int64_t offset, int count)
+static int coroutine_fn qemu_rbd_co_pdiscard(BlockDriverState *bs,
+                                             int64_t offset, int count)
 {
-    int r, ret = -EIO;
+    return qemu_rbd_start_co(bs, offset, count, NULL, 0, RBD_AIO_DISCARD);
+}
+
+#ifdef LIBRBD_SUPPORTS_WRITE_ZEROES
+static int
+coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
+                                      int count, BdrvRequestFlags flags)
+{
+#ifndef RBD_WRITE_ZEROES_FLAG_THICK_PROVISION
+    if (!(flags & BDRV_REQ_MAY_UNMAP)) {
+        return -ENOTSUP;
+    }
+#endif
+    return qemu_rbd_start_co(bs, offset, count, NULL, flags,
+                             RBD_AIO_WRITE_ZEROES);
+}
+#endif
+
+static int64_t qemu_rbd_getlength(BlockDriverState *bs)
+{
     BDRVRBDState *s = bs->opaque;
-    rbd_completion_t c;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+    rbd_image_info_t info;
+    int r;
 
-    r = rbd_aio_create_completion(&task, (rbd_callback_t) qemu_rbd_finish_aiocb, &c);
+    r = rbd_stat(s->image, &info, sizeof(info));
     if (r < 0) {
-        goto out;
+        return r;
     }
 
-    r = rbd_aio_discard(s->image, offset, count, c);
-    if (r < 0) {
-        goto out;
-    }
-
-    while (!task.complete) {
-        qemu_coroutine_yield();
-    }
-
-    if (task.ret < 0) {
-        goto out;
-    }
-
-    ret = 0;
-out:
-    if (ret) {
-        error_report("RBD FAIL %s offset %ld count %d task.ret %ld r %d\n", __FUNCTION__, offset, count, task.ret, r);
-    }
-    return ret;
+    s->image_size = info.size;
+    return info.size;
 }
 
 static char *qemu_rbd_mon_host(BlockdevOptionsRbd *opts, Error **errp)
@@ -995,33 +971,11 @@ static void qemu_rbd_close(BlockDriverState *bs)
     rados_shutdown(s->cluster);
 }
 
-/* Resize the RBD image and update the 'image_size' with the current size */
-static int qemu_rbd_resize(BlockDriverState *bs, uint64_t size)
-{
-    BDRVRBDState *s = bs->opaque;
-    int r;
-
-    r = rbd_resize(s->image, size);
-    if (r < 0) {
-        return r;
-    }
-
-    s->image_size = size;
-
-    return 0;
-}
-
 static int qemu_rbd_getinfo(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     BDRVRBDState *s = bs->opaque;
     bdi->cluster_size = s->object_size;
     return 0;
-}
-
-static int64_t qemu_rbd_getlength(BlockDriverState *bs)
-{
-    BDRVRBDState *s = bs->opaque;
-    return s->image_size;
 }
 
 static int coroutine_fn qemu_rbd_co_truncate(BlockDriverState *bs,
