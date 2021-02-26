@@ -112,13 +112,17 @@ int64_t throttle_compute_wait(LeakyBucket *bkt)
         /* If we have a burst limit then we have to wait until all I/O
          * at burst rate has finished before throttling to bkt->avg */
         bucket_size = bkt->max * bkt->burst_length;
-        burst_bucket_size = (double) bkt->max / 10;
+        burst_bucket_size = bkt->max;
     }
 
     /* If the main bucket is full then we have to wait */
     extra = bkt->level - bucket_size;
     if (extra > 0) {
-        return throttle_do_compute_wait(bkt->avg, extra);
+        int64_t wait = throttle_do_compute_wait(bkt->avg, extra);
+        //~ if (wait) {
+            //~ fprintf(stderr, "wait %ld bkt->level %lf bucket_size %lf bkt->avg %lu\n", wait, bkt->level, bucket_size, bkt->avg);
+        //~ }
+        return wait;
     }
 
     /* If the main bucket is not full yet we still have to check the
