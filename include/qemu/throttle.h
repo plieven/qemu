@@ -98,6 +98,9 @@ typedef struct ThrottleConfig {
 typedef struct ThrottleState {
     ThrottleConfig cfg;       /* configuration */
     int64_t previous_leak;    /* timestamp of the last leak done */
+    char *name;
+    bool qmp_not_enforced;
+    int64_t qmp_last_event;
 } ThrottleState;
 
 typedef struct ThrottleTimers {
@@ -113,7 +116,7 @@ typedef struct ThrottleTimers {
 /* operations on single leaky buckets */
 void throttle_leak_bucket(LeakyBucket *bkt, int64_t delta);
 
-int64_t throttle_compute_wait(LeakyBucket *bkt);
+int64_t throttle_compute_wait(LeakyBucket *bkt, ThrottleState *ts);
 
 /* init/destroy cycle */
 void throttle_init(ThrottleState *ts);

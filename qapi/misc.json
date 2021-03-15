@@ -3051,3 +3051,20 @@
   'data': 'NumaOptions',
   'allow-preconfig': true
 }
+
+##
+# @THROTTLE_CHANGE:
+#
+# Emitted by the throttle backend if enforcement changes (i.e. bucket is empty)
+#
+# @id: device name if defined else node name
+#
+# @enforced: is the hard limit in place
+#
+# Note: This event is rate-limited.
+#
+# Since: 4.0
+#
+##
+{ 'event': 'THROTTLE_CHANGE',
+  'data': { 'id': 'str', 'enforced': 'bool' } }

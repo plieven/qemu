@@ -27,6 +27,7 @@
 #include "qemu/throttle.h"
 #include "qemu/timer.h"
 #include "block/aio.h"
+#include "qapi/qapi-events-misc.h"
 
 /* This function make a bucket leak
  *
@@ -92,7 +93,7 @@ static int64_t throttle_do_compute_wait(double limit, double extra)
  * @bkt: the leaky bucket we operate on
  * @ret: the resulting wait time in ns or 0 if the operation can go through
  */
-int64_t throttle_compute_wait(LeakyBucket *bkt)
+int64_t throttle_compute_wait(LeakyBucket *bkt, ThrottleState *ts)
 {
     double extra; /* the number of extra units blocking the io */
     double bucket_size;   /* I/O before throttling to bkt->avg */
@@ -118,11 +119,18 @@ int64_t throttle_compute_wait(LeakyBucket *bkt)
     /* If the main bucket is full then we have to wait */
     extra = bkt->level - bucket_size;
     if (extra > 0) {
-        int64_t wait = throttle_do_compute_wait(bkt->avg, extra);
-        //~ if (wait) {
-            //~ fprintf(stderr, "wait %ld bkt->level %lf bucket_size %lf bkt->avg %lu\n", wait, bkt->level, bucket_size, bkt->avg);
-        //~ }
-        return wait;
+        if (ts->name && bkt->burst_length > 1 && (ts->qmp_not_enforced || ts->previous_leak - ts->qmp_last_event > bkt->burst_length * NANOSECONDS_PER_SECOND)) {
+            ts->qmp_last_event = ts->previous_leak;
+            qapi_event_send_throttle_change(ts->name, true);
+        }
+        ts->qmp_not_enforced = false;
+        return throttle_do_compute_wait(bkt->avg, extra);
+    }
+
+    if (ts->name && bkt->burst_length > 1 && ts->previous_leak - ts->qmp_last_event > 10 * bkt->burst_length * NANOSECONDS_PER_SECOND) {
+        ts->qmp_not_enforced = true;
+        ts->qmp_last_event = ts->previous_leak;
+        qapi_event_send_throttle_change(ts->name, false);
     }
 
     /* If the main bucket is not full yet we still have to check the
@@ -159,7 +167,7 @@ static int64_t throttle_compute_wait_for(ThrottleState *ts,
 
     for (i = 0; i < 4; i++) {
         BucketType index = to_check[is_write][i];
-        wait = throttle_compute_wait(&ts->cfg.buckets[index]);
+        wait = throttle_compute_wait(&ts->cfg.buckets[index], ts);
         if (wait > max_wait) {
             max_wait = wait;
         }

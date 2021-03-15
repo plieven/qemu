@@ -774,6 +774,7 @@ static void throttle_group_obj_complete(UserCreatable *obj, Error **errp)
     }
     /* We must have a group name at this point */
     assert(tg->name);
+    tg->ts.name = tg->name;
 
     /* error if name is duplicate */
     if (throttle_group_exists(tg->name)) {
