@@ -54,13 +54,6 @@
  * leading "\".
  */
 
-/* rbd_aio_discard added in 0.1.2 */
-#if LIBRBD_VERSION_CODE >= LIBRBD_VERSION(0, 1, 2)
-#define LIBRBD_SUPPORTS_DISCARD
-#else
-#undef LIBRBD_SUPPORTS_DISCARD
-#endif
-
 #define OBJ_MAX_SIZE (1UL << OBJ_DEFAULT_OBJ_ORDER)
 
 #define RBD_MAX_SNAPS 100
@@ -82,11 +75,10 @@ typedef struct BDRVRBDState {
     char *namespace;
     uint64_t image_size;
     uint64_t object_size;
-    AioContext *aio_context;
 } BDRVRBDState;
 
 typedef struct RBDTask {
-    BDRVRBDState *s;
+    BlockDriverState *bs;
     Coroutine *co;
     bool complete;
     int64_t ret;
@@ -493,15 +485,25 @@ static int qemu_rbd_resize(BlockDriverState *bs, uint64_t size)
 static void qemu_rbd_finish_bh(void *opaque)
 {
     RBDTask *task = opaque;
-    task->complete = 1;
+    task->complete = true;
     aio_co_wake(task->co);
 }
 
+/*
+ * This is the completion callback function for all rbd aio calls
+ * started from qemu_rbd_start_co().
+ *
+ * Note: this function is being called from a non qemu thread so
+ * we need to be careful about what we do here. Generally we only
+ * schedule a BH, and do the rest of the io completion handling
+ * from qemu_rbd_finish_bh() which runs in a qemu context.
+ */
 static void qemu_rbd_completion_cb(rbd_completion_t c, RBDTask *task)
 {
     task->ret = rbd_aio_get_return_value(c);
     rbd_aio_release(c);
-    aio_bh_schedule_oneshot(task->s->aio_context, qemu_rbd_finish_bh, task);
+    aio_bh_schedule_oneshot(bdrv_get_aio_context(task->bs),
+                            qemu_rbd_finish_bh, task);
 }
 
 static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
@@ -512,7 +514,7 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
                                           RBDAIOCmd cmd)
 {
     BDRVRBDState *s = bs->opaque;
-    RBDTask task = { .s = s, .co = qemu_coroutine_self() };
+    RBDTask task = { .bs = bs, .co = qemu_coroutine_self() };
     rbd_completion_t c;
     int r;
 
@@ -624,11 +626,6 @@ static int
 coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
                                       int count, BdrvRequestFlags flags)
 {
-#ifndef RBD_WRITE_ZEROES_FLAG_THICK_PROVISION
-    if (!(flags & BDRV_REQ_MAY_UNMAP)) {
-        return -ENOTSUP;
-    }
-#endif
     return qemu_rbd_start_co(bs, offset, count, NULL, flags,
                              RBD_AIO_WRITE_ZEROES);
 }
@@ -637,16 +634,14 @@ coroutine_fn qemu_rbd_co_pwrite_zeroes(BlockDriverState *bs, int64_t offset,
 static int64_t qemu_rbd_getlength(BlockDriverState *bs)
 {
     BDRVRBDState *s = bs->opaque;
-    rbd_image_info_t info;
     int r;
 
-    r = rbd_stat(s->image, &info, sizeof(info));
+    r = rbd_get_size(s->image, &s->image_size);
     if (r < 0) {
         return r;
     }
 
-    s->image_size = info.size;
-    return info.size;
+    return s->image_size;
 }
 
 static char *qemu_rbd_mon_host(BlockdevOptionsRbd *opts, Error **errp)
@@ -922,8 +917,9 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
-    s->aio_context = bdrv_get_aio_context(bs);
-    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP;
+#ifdef LIBRBD_SUPPORTS_WRITE_ZEROES
+    bs->supported_zero_flags = BDRV_REQ_MAY_UNMAP | BDRV_REQ_NO_FALLBACK;
+#endif
 
     r = 0;
     goto out;
@@ -1159,18 +1155,6 @@ static const char *const qemu_rbd_strong_runtime_opts[] = {
     NULL
 };
 
-static void qemu_rbd_attach_aio_context(BlockDriverState *bs,
-                                       AioContext *new_context)
-{
-    BDRVRBDState *s = bs->opaque;
-    s->aio_context = new_context;
-}
-
-static void qemu_rbd_detach_aio_context(BlockDriverState *bs)
-{
-
-}
-
 
 static BlockDriver bdrv_rbd = {
     .format_name            = "rbd",
@@ -1199,12 +1183,7 @@ static BlockDriver bdrv_rbd = {
     .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
     .bdrv_snapshot_list     = qemu_rbd_snap_list,
     .bdrv_snapshot_goto     = qemu_rbd_snap_rollback,
-#ifdef LIBRBD_SUPPORTS_INVALIDATE
     .bdrv_co_invalidate_cache = qemu_rbd_co_invalidate_cache,
-#endif
-
-    .bdrv_attach_aio_context        = qemu_rbd_attach_aio_context,
-    .bdrv_detach_aio_context        = qemu_rbd_detach_aio_context,
 
     .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
 };
