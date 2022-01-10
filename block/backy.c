@@ -38,6 +38,7 @@
 #include "json.h"
 
 #define DEDUP_MAC_NAME "mmh3-x64-128"
+#define DEDUP_MAC_NAME_XXH3 "xxh3-128"
 #define DEDUP_MAC_SIZE 128
 #define DEDUP_MAC_SIZE_BYTES DEDUP_MAC_SIZE / 8
 #define DEDUP_MAC_SIZE_STR DEDUP_MAC_SIZE / 4 + 1
@@ -60,6 +61,7 @@ typedef struct BDRVBackyState {
     uint8_t* block_is_compressed;
     char zeroblock_hash[DEDUP_MAC_SIZE_BYTES];
     uint32_t crc32c_expected;
+    bool use_xxh3_128;
     char *chunk_dir;
     uint64_t cache_ts[BACKY_CACHE_SIZE];
     uint64_t cache_chunk_nr[BACKY_CACHE_SIZE];
@@ -143,9 +145,11 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         } else if (val->type == json_integer && !strcmp(name, "version")) {
             s->version = val->u.integer;
         } else if (val->type == json_string && !strcmp(name, "hash")) {
-            if (val->u.string.length != strlen(DEDUP_MAC_NAME) || strncmp(DEDUP_MAC_NAME, val->u.string.ptr, strlen(DEDUP_MAC_NAME))) {
-                 error_setg(errp, "unsupported hash: '%.*s'", val->u.string.length, val->u.string.ptr);
-                 goto fail;
+            if (val->u.string.length == strlen(DEDUP_MAC_NAME_XXH3) && !strncmp(DEDUP_MAC_NAME_XXH3, val->u.string.ptr, strlen(DEDUP_MAC_NAME_XXH3))) {
+                s->use_xxh3_128 = true;
+            } else if (val->u.string.length != strlen(DEDUP_MAC_NAME) || strncmp(DEDUP_MAC_NAME, val->u.string.ptr, strlen(DEDUP_MAC_NAME))) {
+                error_setg(errp, "unsupported hash: '%.*s'", val->u.string.length, val->u.string.ptr);
+                goto fail;
             }
         } else if (val->type == json_string && !strcmp(name, "crc32c")) {
             /* not needed */
@@ -185,18 +189,36 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* init zeroblock hash */
-    switch (s->block_size) {
-    case 1048576:
-        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xa9, 0xb7, 0x3e, 0xfb, 0xd2, 0x83, 0xf5, 0xd1, 0x55, 0x6e, 0xed, 0x0a, 0xed, 0x52, 0x60, 0x5d}, sizeof(s->zeroblock_hash));
-        break;
-    case 4194304:
-        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xc7, 0x2b, 0x4b, 0xa8, 0x2d, 0x1f, 0x51, 0xb7, 0x1c, 0x8a, 0x18, 0x19, 0x5a, 0xd3, 0x3f, 0xc8}, sizeof(s->zeroblock_hash));
-        break;
-    case 15728640:
-        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0x58, 0x64, 0xbc, 0x8a, 0xb1, 0x39, 0xf7, 0xb5, 0x9b, 0x59, 0xbc, 0xfa, 0x79, 0x14, 0x80, 0xc7}, sizeof(s->zeroblock_hash));
-        break;
-    default:
-        error_setg(errp, "unsupported blocksize %u", s->block_size);
+    if (s->use_xxh3_128) {
+        switch (s->block_size) {
+        case 1048576:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xb6, 0xef, 0x17, 0xa3, 0x44, 0x84, 0x92, 0xb6, 0x91, 0x87, 0x80, 0xb9, 0x05, 0x50, 0xbf, 0x34}, sizeof(s->zeroblock_hash));
+            break;
+        case 4194304:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0x34, 0x00, 0x1a, 0xe2, 0xf9, 0x47, 0xe7, 0x73, 0x16, 0x5f, 0x45, 0x3a, 0x5f, 0x35, 0xc4, 0x59}, sizeof(s->zeroblock_hash));
+            break;
+        case 15728640:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xa3, 0x84, 0x90, 0x99, 0xfe, 0x3e, 0xcc, 0x47, 0x0e, 0x04, 0xb4, 0x9c, 0xba, 0x22, 0x1e, 0x3f}, sizeof(s->zeroblock_hash));
+            break;
+        default:
+            error_setg(errp, "unsupported %s blocksize %u", DEDUP_MAC_NAME_XXH3, s->block_size);
+            goto fail;
+        }
+    } else {
+        switch (s->block_size) {
+        case 1048576:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xa9, 0xb7, 0x3e, 0xfb, 0xd2, 0x83, 0xf5, 0xd1, 0x55, 0x6e, 0xed, 0x0a, 0xed, 0x52, 0x60, 0x5d}, sizeof(s->zeroblock_hash));
+            break;
+        case 4194304:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xc7, 0x2b, 0x4b, 0xa8, 0x2d, 0x1f, 0x51, 0xb7, 0x1c, 0x8a, 0x18, 0x19, 0x5a, 0xd3, 0x3f, 0xc8}, sizeof(s->zeroblock_hash));
+            break;
+        case 15728640:
+            memcpy(&s->zeroblock_hash[0], (unsigned char[]){0x58, 0x64, 0xbc, 0x8a, 0xb1, 0x39, 0xf7, 0xb5, 0x9b, 0x59, 0xbc, 0xfa, 0x79, 0x14, 0x80, 0xc7}, sizeof(s->zeroblock_hash));
+            break;
+        default:
+            error_setg(errp, "unsupported %s blocksize %u", DEDUP_MAC_NAME, s->block_size);
+            goto fail;
+        }
     }
 
     /* process mapping */
