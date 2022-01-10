@@ -238,14 +238,15 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
-    s->chunk_dir = bdrv_dirname(bs, &local_err);
+    char *tmp = bdrv_dirname(bs, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         error_free(s->migration_blocker);
         goto fail;
     }
-    s->chunk_dir = g_realloc(s->chunk_dir, strlen(s->chunk_dir) + 7);
-    sprintf(s->chunk_dir, "%schunks", s->chunk_dir);
+    s->chunk_dir = g_malloc(strlen(tmp) + 7);
+    sprintf(s->chunk_dir, "%schunks", tmp);
+    free(tmp);
 
     ret = 0;
 
