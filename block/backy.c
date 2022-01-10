@@ -137,9 +137,6 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
         goto fail;
     }
 
-    s->zeroblock = g_malloc0(s->block_size);
-    mmh3(s->zeroblock, s->block_size, 0, &s->zeroblock_hash[0]);
-
     for (i = 0; i < value->u.object.length; i++) {
         json_char *name = value->u.object.values[i].name;
         json_value *val = value->u.object.values[i].value;
@@ -190,6 +187,10 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     } else {
         s->block_count = (s->filesize + s->block_size - 1) / (s->block_size);
     }
+
+    /* init zeroblock hash */
+    s->zeroblock = g_malloc0(s->block_size);
+    mmh3(s->zeroblock, s->block_size, 0, &s->zeroblock_hash[0]);
 
     /* process mapping */
     s->block_mapping = g_malloc((DEDUP_MAC_SIZE_BYTES) * s->block_count);
