@@ -36,9 +36,6 @@
 #include <lzo/lzo1x.h>
 
 #include "json.h"
-#include "MurmurHash3.h"
-
-extern void _Z19MurmurHash3_x64_128PKvijPv ( const void * key, int len, uint32_t seed, void * out );
 
 #define DEDUP_MAC_NAME "mmh3-x64-128"
 #define DEDUP_MAC_SIZE 128
@@ -55,7 +52,6 @@ extern void _Z19MurmurHash3_x64_128PKvijPv ( const void * key, int len, uint32_t
 typedef struct BDRVBackyState {
     CoMutex lock;
     Error *migration_blocker;
-    void *zeroblock;
     unsigned int block_size;
     unsigned int version;
     uint64_t filesize;
@@ -189,8 +185,19 @@ static int backy_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* init zeroblock hash */
-    s->zeroblock = g_malloc0(s->block_size);
-    mmh3(s->zeroblock, s->block_size, 0, &s->zeroblock_hash[0]);
+    switch (s->block_size) {
+    case 1048576:
+        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xa9, 0xb7, 0x3e, 0xfb, 0xd2, 0x83, 0xf5, 0xd1, 0x55, 0x6e, 0xed, 0x0a, 0xed, 0x52, 0x60, 0x5d}, sizeof(s->zeroblock_hash));
+        break;
+    case 4194304:
+        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0xc7, 0x2b, 0x4b, 0xa8, 0x2d, 0x1f, 0x51, 0xb7, 0x1c, 0x8a, 0x18, 0x19, 0x5a, 0xd3, 0x3f, 0xc8}, sizeof(s->zeroblock_hash));
+        break;
+    case 15728640:
+        memcpy(&s->zeroblock_hash[0], (unsigned char[]){0x58, 0x64, 0xbc, 0x8a, 0xb1, 0x39, 0xf7, 0xb5, 0x9b, 0x59, 0xbc, 0xfa, 0x79, 0x14, 0x80, 0xc7}, sizeof(s->zeroblock_hash));
+        break;
+    default:
+        error_setg(errp, "unsupported blocksize %u", s->block_size);
+    }
 
     /* process mapping */
     s->block_mapping = g_malloc((DEDUP_MAC_SIZE_BYTES) * s->block_count);
@@ -529,7 +536,6 @@ static void backy_close(BlockDriverState *bs)
 {
     BDRVBackyState *s = bs->opaque;
     long i;
-    g_free(s->zeroblock);
     g_free(s->block_mapping);
     g_free(s->block_is_compressed);
     g_free(s->chunk_dir);
