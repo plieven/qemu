@@ -1047,6 +1047,24 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
         goto failed_open;
     }
 
+    if (!(bdrv_get_flags(bs) & BDRV_O_INACTIVE)) {
+        error_report("qemu_rbd_open: rbd_lock_acquire");
+        r = rbd_lock_acquire(s->image, RBD_LOCK_MODE_EXCLUSIVE);
+        if (r < 0) {
+            if (r == -EROFS) {
+                error_setg(errp, "failed to acquire excl lock for %s",
+                           s->image_name);
+                error_append_hint(errp,
+                                  "Is another process using the image?\n");
+            } else {
+                error_setg_errno(errp, -r, "failed to acquire excl lock for %s",
+                                 s->image_name);
+            }
+            goto failed_open;
+        }
+        error_report("qemu_rbd_open: rbd_lock_acquire success");
+    }
+
     r = rbd_stat(s->image, &info, sizeof(info));
     if (r < 0) {
         error_setg_errno(errp, -r, "error getting image info from %s",
@@ -1266,17 +1284,50 @@ static int qemu_rbd_snap_list(BlockDriverState *bs,
     return snap_count;
 }
 
-#ifdef LIBRBD_SUPPORTS_INVALIDATE
 static void coroutine_fn qemu_rbd_co_invalidate_cache(BlockDriverState *bs,
                                                       Error **errp)
 {
     BDRVRBDState *s = bs->opaque;
-    int r = rbd_invalidate_cache(s->image);
+    int r;
+
+    if (!(bdrv_get_flags(bs) & BDRV_O_INACTIVE)) {
+        error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire");
+        r = rbd_lock_acquire(s->image, RBD_LOCK_MODE_EXCLUSIVE);
+        if (r < 0) {
+            if (r == -EROFS) {
+                error_setg(errp, "failed to acquire excl lock for %s",
+                           s->image_name);
+                error_append_hint(errp,
+                                  "Is another process using the image?\n");
+            } else {
+                error_setg_errno(errp, -r, "failed to acquire excl lock for %s",
+                                 s->image_name);
+            }
+            return;
+        }
+        error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire success");
+    }
+
+    r = rbd_invalidate_cache(s->image);
     if (r < 0) {
         error_setg_errno(errp, -r, "Failed to invalidate the cache");
     }
 }
-#endif
+
+static int qemu_rbd_inactivate(BlockDriverState *bs)
+{
+    BDRVRBDState *s = bs->opaque;
+    int r;
+    error_report("qemu_rbd_inactivate: rbd_lock_release");
+    r = rbd_lock_release(s->image);
+    if (r < 0) {
+        error_report("failed to release lock for %s (%s)", s->image_name,
+                     strerror(-r));
+    } else {
+        error_report("qemu_rbd_inactivate: rbd_lock_release success");
+    }
+    return r;
+}
 
 static QemuOptsList qemu_rbd_create_opts = {
     .name = "rbd-create-opts",
@@ -1338,11 +1389,12 @@ static BlockDriver bdrv_rbd = {
     .bdrv_co_pwrite_zeroes          = qemu_rbd_co_pwrite_zeroes,
     .bdrv_co_block_status           = qemu_rbd_co_block_status,
 
-    .bdrv_snapshot_create   = qemu_rbd_snap_create,
-    .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
-    .bdrv_snapshot_list     = qemu_rbd_snap_list,
-    .bdrv_snapshot_goto     = qemu_rbd_snap_rollback,
+    .bdrv_snapshot_create     = qemu_rbd_snap_create,
+    .bdrv_snapshot_delete     = qemu_rbd_snap_remove,
+    .bdrv_snapshot_list       = qemu_rbd_snap_list,
+    .bdrv_snapshot_goto       = qemu_rbd_snap_rollback,
     .bdrv_co_invalidate_cache = qemu_rbd_co_invalidate_cache,
+    .bdrv_inactivate          = qemu_rbd_inactivate,
 
     .strong_runtime_opts    = qemu_rbd_strong_runtime_opts,
 };
