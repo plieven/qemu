@@ -1291,21 +1291,26 @@ static void coroutine_fn qemu_rbd_co_invalidate_cache(BlockDriverState *bs,
     int r;
 
     if (!(bdrv_get_flags(bs) & BDRV_O_INACTIVE)) {
-        error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire");
-        r = rbd_lock_acquire(s->image, RBD_LOCK_MODE_EXCLUSIVE);
-        if (r < 0) {
-            if (r == -EROFS) {
-                error_setg(errp, "failed to acquire excl lock for %s",
-                           s->image_name);
-                error_append_hint(errp,
-                                  "Is another process using the image?\n");
-            } else {
-                error_setg_errno(errp, -r, "failed to acquire excl lock for %s",
-                                 s->image_name);
+        int owner;
+        r = rbd_is_exclusive_lock_owner(s->image, &owner);
+        error_report("qemu_rbd_co_invalidate_cache: is excl lock r %d owner %d", r, owner);
+        if (!owner) {
+            error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire");
+            r = rbd_lock_acquire(s->image, RBD_LOCK_MODE_EXCLUSIVE);
+            if (r < 0) {
+                if (r == -EROFS) {
+                    error_setg(errp, "failed to acquire excl lock for %s",
+                               s->image_name);
+                    error_append_hint(errp,
+                                      "Is another process using the image?\n");
+                } else {
+                    error_setg_errno(errp, -r, "failed to acquire excl lock for %s",
+                                     s->image_name);
+                }
+                return;
             }
-            return;
+            error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire success");
         }
-        error_report("qemu_rbd_co_invalidate_cache: rbd_lock_acquire success");
     }
 
     r = rbd_invalidate_cache(s->image);
@@ -1317,7 +1322,12 @@ static void coroutine_fn qemu_rbd_co_invalidate_cache(BlockDriverState *bs,
 static int qemu_rbd_inactivate(BlockDriverState *bs)
 {
     BDRVRBDState *s = bs->opaque;
-    int r;
+    int r, owner;
+    r = rbd_is_exclusive_lock_owner(s->image, &owner);
+    error_report("qemu_rbd_inactivate: is excl lock r %d owner %d", r, owner);
+    if (!owner) {
+        return 0;
+    }
     error_report("qemu_rbd_inactivate: rbd_lock_release");
     r = rbd_lock_release(s->image);
     if (r < 0) {
