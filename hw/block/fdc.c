@@ -1357,7 +1357,7 @@ static FDrive *get_cur_drv(FDCtrl *fdctrl)
          * Due to the controller QOM model limitations, we don't
          * attach the created to the controller device.
          */
-        cur_drv->blk = blk_create_empty_drive();
+        cur_drv->blk = blk_new(0, BLK_PERM_ALL);
     }
     return cur_drv;
 }
