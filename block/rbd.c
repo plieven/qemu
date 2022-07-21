@@ -76,6 +76,8 @@ typedef struct BDRVRBDState {
     uint64_t image_size;
     uint64_t object_size;
     uint64_t features;
+    uint64_t num_writes;
+    uint64_t num_writes_4k;
 } BDRVRBDState;
 
 typedef struct RBDTask {
@@ -513,6 +515,8 @@ static void qemu_rbd_completion_cb(rbd_completion_t c, RBDTask *task)
                             qemu_rbd_finish_bh, task);
 }
 
+#define STACKBUF_MAX 4096
+
 static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
                                           uint64_t offset,
                                           uint64_t bytes,
@@ -523,7 +527,9 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
     BDRVRBDState *s = bs->opaque;
     RBDTask task = { .bs = bs, .co = qemu_coroutine_self() };
     rbd_completion_t c;
+    char *buf = NULL;
     int r;
+    char stackbuf[STACKBUF_MAX];
 
     assert(!qiov || qiov->size == bytes);
 
@@ -538,7 +544,16 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
         r = rbd_aio_readv(s->image, qiov->iov, qiov->niov, offset, c);
         break;
     case RBD_AIO_WRITE:
-        r = rbd_aio_writev(s->image, qiov->iov, qiov->niov, offset, c);
+        s->num_writes++;
+        if (bytes <= STACKBUF_MAX) {
+            qemu_iovec_to_buf(qiov, 0, &stackbuf[0], bytes);
+            r = rbd_aio_write(s->image, offset, bytes, &stackbuf[0], c);
+            s->num_writes_4k++;
+        } else {
+            buf = g_try_malloc(bytes);
+            qemu_iovec_to_buf(qiov, 0, buf, bytes);
+            r = rbd_aio_write(s->image, offset, bytes, buf, c);
+        }
         break;
     case RBD_AIO_DISCARD:
         r = rbd_aio_discard(s->image, offset, bytes, c);
@@ -567,6 +582,7 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
                      " bytes %" PRIu64 " flags %d r %d (%s)", cmd, offset,
                      bytes, flags, r, strerror(-r));
         rbd_aio_release(c);
+        g_free(buf);
         return r;
     }
 
@@ -578,6 +594,7 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
         error_report("rbd request failed: cmd %d offset %" PRIu64 " bytes %"
                      PRIu64 " flags %d task.ret %" PRIi64 " (%s)", cmd, offset,
                      bytes, flags, task.ret, strerror(-task.ret));
+        g_free(buf);
         return task.ret;
     }
 
@@ -586,6 +603,7 @@ static int coroutine_fn qemu_rbd_start_co(BlockDriverState *bs,
         qemu_iovec_memset(qiov, task.ret, 0, qiov->size - task.ret);
     }
 
+    g_free(buf);
     return 0;
 }
 
@@ -898,6 +916,14 @@ static int qemu_rbd_connect(rados_t *cluster, rados_ioctx_t *io_ctx,
         rados_conf_set(*cluster, "rbd_cache", "false");
     }
 
+    /* set rbd_disable_zero_copy_write false */
+    r = rados_conf_set(*cluster, "rbd_disable_zero_copy_writes", "false");
+    if (r < 0) {
+        error_setg_errno(errp, -r, "error setting rbd_disable_zero_copy_writes to false");
+        goto failed_shutdown;
+    }
+    error_report("qemu_rbd_connect: set rbd_disable_zero_copy_writes to false");
+
     r = rados_connect(*cluster);
     if (r < 0) {
         error_setg_errno(errp, -r, "error connecting");
@@ -1135,7 +1161,8 @@ static int qemu_rbd_reopen_prepare(BDRVReopenState *state,
 static void qemu_rbd_close(BlockDriverState *bs)
 {
     BDRVRBDState *s = bs->opaque;
-
+    error_report("rbd_close: num_writes %" PRIu64 " num_writes_4k %" PRIu64,
+                 s->num_writes, s->num_writes_4k);
     rbd_close(s->image);
     rados_ioctx_destroy(s->io_ctx);
     g_free(s->snap);
