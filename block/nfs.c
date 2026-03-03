@@ -75,6 +75,12 @@ typedef struct NFSRPC {
     NFSClient *client;
 } NFSRPC;
 
+static void nfs_co_generic_bh_cb(void *opaque)
+{
+    NFSRPC *task = opaque;
+    aio_co_wake(task->co);
+}
+
 static int nfs_parse_uri(const char *filename, QDict *options, Error **errp)
 {
     g_autoptr(GUri) uri = g_uri_parse(filename, G_URI_FLAGS_NONE, NULL);
@@ -248,15 +254,8 @@ nfs_co_generic_cb(int ret, struct nfs_context *nfs, void *data,
         error_report("NFS Error: %s", nfs_get_error(nfs));
     }
 
-    /*
-     * Safe to call: nfs_service(), which called us, is only run from the FD
-     * handlers, never from the request coroutine.  The request coroutine in
-     * turn will yield unconditionally.
-     * No need to release the lock, even if we directly enter the coroutine, as
-     * the lock is never re-taken after yielding.  (Note: If we do enter the
-     * coroutine, @task will probably be dangling once aio_co_wake() returns.)
-     */
-    aio_co_wake(task->co);
+    replay_bh_schedule_oneshot_event(task->client->aio_context,
+                                     nfs_co_generic_bh_cb, task);
 }
 
 static int coroutine_fn nfs_co_preadv(BlockDriverState *bs, int64_t offset,
@@ -716,8 +715,8 @@ nfs_get_allocated_file_size_cb(int ret, struct nfs_context *nfs, void *data,
     if (task->ret < 0) {
         error_report("NFS Error: %s", nfs_get_error(nfs));
     }
-    /* Safe to call, see nfs_co_generic_cb() */
-    aio_co_wake(task->co);
+    replay_bh_schedule_oneshot_event(task->client->aio_context,
+                                     nfs_co_generic_bh_cb, task);
 }
 
 static int64_t coroutine_fn nfs_co_get_allocated_file_size(BlockDriverState *bs)
